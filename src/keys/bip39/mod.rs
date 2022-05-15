@@ -387,4 +387,53 @@ mod test {
 			);
         }
     }
+
+    fn test_invalid_engish() {
+		// correct phrase:
+		// "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
+
+		assert_eq!(
+			Mnemonic::parse_in(
+                Language::English,
+				"getter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+			),
+			Err(Error::InvalidMnemonicWord("getter"))
+		);
+
+		assert_eq!(
+			Mnemonic::parse_in(
+                Language::English,
+				"letter advice cagex absurd amount doctor acoustic avoid letter advice cage above",
+			),
+			Err(Error::InvalidMnemonicWord("cagex"))
+		);
+
+		assert_eq!(
+			Mnemonic::parse_in(
+                Language::English,
+				"advice cage absurd amount doctor acoustic avoid letter advice cage above",
+			),
+			Err(Error::BadWordCount(11))
+		);
+
+		assert_eq!(
+			Mnemonic::parse_in(
+                Language::English,
+				"primary advice cage absurd amount doctor acoustic avoid letter advice cage above",
+			),
+			Err(Error::InvalidChecksum)
+		);
+	}
+
+	#[test]
+	fn test_invalid_entropy() {
+		//between 128 and 256 bits, but not divisible by 32
+		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 17]), Err(Error::NotMultipleOf32(136)));
+
+		//less than 128 bits
+		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 4]), Err(Error::OutOfBoundBitCount(32)));
+
+		//greater than 256 bits
+		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 36]), Err(Error::OutOfBoundBitCount(288)));
+	}
 }
