@@ -1,9 +1,8 @@
 //This implementation of PBKDF2 comes from the 
-// rust-bip39 crate. The author is Steven Roose
+// rust-bip39 crate. The author is Steven Roose <steven@stevenroose.org>
 // The code comes from this file: https://github.com/rust-bitcoin/rust-bip39/blob/master/src/pbkdf2.rs
 
 use bitcoin::hashes::{hmac, sha512, Hash, HashEngine};
-use crate::util;
 
 
 /// Create an HMAC engine from the passphrase.
@@ -85,7 +84,7 @@ fn xor(res: &mut [u8], salt: &[u8]) {
 }
 
 /// PBKDF2-HMAC-SHA512 implementation using bitcoin_hashes.
-pub(crate) fn pbkdf2(mnemonic: Vec<&'static str>, unprefixed_salt: &[u8], c: usize, res: &mut [u8]) {
+pub(crate) fn pbkdf2(mnemonic: Vec<&'static str>, salt: &[u8], c: usize, res: &mut [u8]) {
 	let prf = create_hmac_engine(mnemonic);
 
 	for (i, chunk) in res.chunks_mut(sha512::Hash::LEN).enumerate() {
@@ -95,8 +94,7 @@ pub(crate) fn pbkdf2(mnemonic: Vec<&'static str>, unprefixed_salt: &[u8], c: usi
 
 		let mut salt = {
 			let mut prfc = prf.clone();
-			prfc.input(util::SALT_PREFIX.as_bytes());
-			prfc.input(unprefixed_salt);
+			prfc.input(salt);
 			prfc.input(&u32_to_array_be((i + 1) as u32));
 
 			let salt = hmac::Hmac::from_engine(prfc).into_inner();
