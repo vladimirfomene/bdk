@@ -16,7 +16,7 @@ use bitcoin::Network;
 
 use miniscript::ScriptContext;
 
-pub use bip39::{Error, Language, Mnemonic};
+
 
 pub mod mnemonic;
 mod util;
