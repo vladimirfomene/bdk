@@ -1,7 +1,8 @@
 use bitcoin::bitcoin_hashes::{ sha256, Hash };
 use std::fmt;
 use crate::language::{self, Language, english };
-use crate::util::{self, Error};
+use crate::util::{self, Error, BYTE_SIZE, MIN_NUM_BITS, MAX_NUM_BITS, 
+    MAX_WORD_COUNT, MIN_WORD_COUNT, ENTROPY_MULTIPLE, WORD_BITS };
 
 
 #[derive(Debug)]
@@ -14,7 +15,7 @@ impl Mnemonic {
 
     pub fn from_entropy_in(language: Language, entropy: &[u8]) -> Result<Mnemonic, Error> {
 
-        let entropy_size = entropy.len() * util::BYTE_SIZE;
+        let entropy_size = entropy.len() * BYTE_SIZE;
 
         if((entropy_size >= MIN_NUM_BITS) && (entropy_size <= MAX_NUM_BITS)){
             return Err(Error::OutOfBoundBitCount(entropy_size));
@@ -25,18 +26,18 @@ impl Mnemonic {
         }
 
         let checksum = generate_checksum(entropy);
-        let checksum_size = (entropy.len() * util::BYTE_SIZE) / util::ENTROPY_MULTIPLE;
+        let checksum_size = (entropy.len() * BYTE_SIZE) / ENTROPY_MULTIPLE;
         
-        let mnemonic_word_count = (entropy_size + checksum_size) / util::WORD_BITS;
+        let mnemonic_word_count = (entropy_size + checksum_size) / WORD_BITS;
         let mut bits = vec![false; entropy_size + checksum_size];
 
         //add entropy bits to bits array
-        for (index, bit) in bits[..(entropy.len() * util::BYTE_SIZE)].iter_mut().enumerate(){
-            *bit = util::get_index_bit(entropy[index / util::BYTE_SIZE], index % util::BYTE_SIZE);
+        for (index, bit) in bits[..(entropy.len() * BYTE_SIZE)].iter_mut().enumerate(){
+            *bit = util::get_index_bit(entropy[index / BYTE_SIZE], index % BYTE_SIZE);
         }
 
         //add checksum bits to bits array
-        for (index, bit) in bits[(entropy.len() * util::BYTE_SIZE)..].iter_mut().enumerate() {
+        for (index, bit) in bits[(entropy.len() * BYTE_SIZE)..].iter_mut().enumerate() {
             *bit = util::get_index_bit(checksum[0], index);
         }
 
@@ -72,6 +73,60 @@ impl Mnemonic {
         return seed;
     }
     
+    pub fn parse_in(lang: Language, sentence: &str) -> Result<Mnemonic, Error> {
+        let sentence_iter = sentence.split_whitespace();
+        let word_count = sentence_iter.count();
+        let word_indices = Vec::with_capacity(word_count);
+
+        if word_count > MAX_WORD_COUNT || word_count % 6 != 0 || word_count < MIN_WORD_COUNT {
+            return Err(Error::BadWordCount(word_count));
+        }
+
+        let bits = vec![false; word_count * 11];
+        for (i, word) in sentence_iter.enumerate() {
+            //get index for this word.
+            let idx = lang.get_word_index(word).ok_or(Err(Error::WordNotFound))?;
+
+            word_indices.push(idx);
+
+            //update the 11 bits corresponding to the word_index
+            for j in 0..11 {
+                bits[(11 * i) + j] = idx & (1 << 10 - j) != 0
+            }
+        }
+
+
+        //make sure the checksum is correct
+        //create a vector to store entropy 
+        //if you are wondering how this length was calculated, 
+        //do the math using these two equations, CS = ENT / 32 and MS = (ENT + CS) / 11
+        let mut entropy = vec![0u8; word_count / 3 * 4];
+        let entropy_byte_len = word_count / 3 * 4;
+        for i in 0..entropy_byte_len {
+            for j in 0..BYTE_SIZE {
+                if  bits[i * BYTE_SIZE + j]  {
+                    entropy[i] += 1 << (BYTE_SIZE - 1 - j);
+                }
+            }
+        }
+
+        let entropy_hash = sha256::Hash::hash(entropy);
+        let entropy_hash = entropy_hash.as_ref();
+        let checksum_byte = entropy_hash[0];
+        
+        let entropy_bit_len = word_count / 3 * 32;
+        for i in bits[entropy_bit_len..] {
+            if util::get_index_bit(checksum_byte, i) != bits[entropy_bit_len + i] {
+                return Err(Error::InvalidChecksum);
+            }
+        }
+
+        return Ok(Mnemonic{
+            lang,
+            words: word_indices
+        });
+
+    }
 
 
     fn generate_mnemonic_words(&self) -> Vec<&'static str> {
