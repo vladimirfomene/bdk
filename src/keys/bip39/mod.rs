@@ -9,10 +9,7 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-//! BIP-0039
 
-// TODO: maybe write our own implementation of bip39? Seems stupid to have an extra dependency for
-// something that should be fairly simple to re-implement.
 
 use bitcoin::util::bip32;
 use bitcoin::Network;
@@ -20,6 +17,12 @@ use bitcoin::Network;
 use miniscript::ScriptContext;
 
 pub use bip39::{Error, Language, Mnemonic};
+
+pub mod mnemonic;
+mod util;
+mod pbkdf2;
+mod language;
+
 
 type Seed = [u8; 64];
 
