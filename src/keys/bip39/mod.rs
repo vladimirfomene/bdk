@@ -9,22 +9,19 @@
 // You may not use this file except in accordance with one or both of these
 // licenses.
 
-
-
 use bitcoin::util::bip32;
 use bitcoin::Network;
 
 use miniscript::ScriptContext;
 
-use crate::mnemonic::Mnemonic;
 use crate::language::Language;
+use crate::mnemonic::Mnemonic;
 use crate::util::Error;
 
-mod mnemonic;
-mod util;
-mod pbkdf2;
-mod language;
-
+pub mod language;
+pub mod mnemonic;
+pub mod pbkdf2;
+pub mod util;
 
 type Seed = [u8; 64];
 
@@ -154,14 +151,14 @@ impl<Ctx: ScriptContext> GeneratableKey<Ctx> for Mnemonic {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
+    use super::*;
+
     use std::str::FromStr;
 
     use bitcoin::util::bip32;
 
     use bitcoin::hashes::hex::FromHex;
-
-    use bip39::{Language, Mnemonic};
 
     use crate::keys::{any_network, GeneratableKey, GeneratedKey};
 
@@ -231,11 +228,11 @@ mod test {
     }
 
     //The data used for the test below has been borrowed
-    //from the rust-bip39 crate. The author is 
+    //from the rust-bip39 crate. The author is
     //Steven Roose <steven@stevenroose.org>
 
     #[test]
-    fn test_vectors_english(){
+    fn test_bip39_vectors_english() {
         //The tuples represent
         //entropy, mnemonic and seed
         let test_vectors = [
@@ -367,73 +364,83 @@ mod test {
         //parse_in(lang: Language, sentence: &str)
 
         for vector in &test_vectors {
-			let entropy = Vec::<u8>::from_hex(&vector.0).unwrap();
-			let mnemonic_str = vector.1;
-			let seed = Vec::<u8>::from_hex(&vector.2).unwrap();
+            let entropy = Vec::<u8>::from_hex(&vector.0).unwrap();
+            let mnemonic_str = vector.1;
+            let seed = Vec::<u8>::from_hex(&vector.2).unwrap();
 
-			let mnemonic = Mnemonic::from_entropy_in(&entropy).unwrap();
+            let mnemonic = Mnemonic::from_entropy_in(&entropy).unwrap();
 
-			assert_eq!(
-				mnemonic,
-				Mnemonic::parse_in(Language::English, mnemonic_str).unwrap(),
-				"failed vector: {}",
-				mnemonic_str
-			);
-			assert_eq!(
-				&seed[..],
-				&mnemonic.to_seed("TREZOR")[..],
-				"failed vector: {}",
-				mnemonic_str
-			);
+            assert_eq!(
+                mnemonic,
+                Mnemonic::parse_in(Language::English, mnemonic_str).unwrap(),
+                "failed vector: {}",
+                mnemonic_str
+            );
+            assert_eq!(
+                &seed[..],
+                &mnemonic.to_seed("TREZOR")[..],
+                "failed vector: {}",
+                mnemonic_str
+            );
         }
     }
 
-    fn test_invalid_engish() {
-		// correct phrase:
-		// "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
+    #[test]
+    fn test_bip39_invalid_engish() {
+        // correct phrase:
+        // "letter advice cage absurd amount doctor acoustic avoid letter advice cage above"
 
-		assert_eq!(
-			Mnemonic::parse_in(
+        assert_eq!(
+            Mnemonic::parse_in(
                 Language::English,
-				"getter advice cage absurd amount doctor acoustic avoid letter advice cage above",
-			),
-			Err(Error::InvalidMnemonicWord("getter"))
-		);
+                "getter advice cage absurd amount doctor acoustic avoid letter advice cage above",
+            ),
+            Err(Error::InvalidMnemonicWord("getter"))
+        );
 
-		assert_eq!(
-			Mnemonic::parse_in(
+        assert_eq!(
+            Mnemonic::parse_in(
                 Language::English,
-				"letter advice cagex absurd amount doctor acoustic avoid letter advice cage above",
-			),
-			Err(Error::InvalidMnemonicWord("cagex"))
-		);
+                "letter advice cagex absurd amount doctor acoustic avoid letter advice cage above",
+            ),
+            Err(Error::InvalidMnemonicWord("cagex"))
+        );
 
-		assert_eq!(
-			Mnemonic::parse_in(
+        assert_eq!(
+            Mnemonic::parse_in(
                 Language::English,
-				"advice cage absurd amount doctor acoustic avoid letter advice cage above",
-			),
-			Err(Error::BadWordCount(11))
-		);
+                "advice cage absurd amount doctor acoustic avoid letter advice cage above",
+            ),
+            Err(Error::BadWordCount(11))
+        );
 
-		assert_eq!(
-			Mnemonic::parse_in(
+        assert_eq!(
+            Mnemonic::parse_in(
                 Language::English,
-				"primary advice cage absurd amount doctor acoustic avoid letter advice cage above",
-			),
-			Err(Error::InvalidChecksum)
-		);
-	}
+                "primary advice cage absurd amount doctor acoustic avoid letter advice cage above",
+            ),
+            Err(Error::InvalidChecksum)
+        );
+    }
 
-	#[test]
-	fn test_invalid_entropy() {
-		//between 128 and 256 bits, but not divisible by 32
-		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 17]), Err(Error::NotMultipleOf32(136)));
+    #[test]
+    fn test_bip39_invalid_entropy() {
+        //between 128 and 256 bits, but not divisible by 32
+        assert_eq!(
+            Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 17]),
+            Err(Error::NotMultipleOf32(136))
+        );
 
-		//less than 128 bits
-		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 4]), Err(Error::OutOfBoundBitCount(32)));
+        //less than 128 bits
+        assert_eq!(
+            Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 4]),
+            Err(Error::OutOfBoundBitCount(32))
+        );
 
-		//greater than 256 bits
-		assert_eq!(Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 36]), Err(Error::OutOfBoundBitCount(288)));
-	}
+        //greater than 256 bits
+        assert_eq!(
+            Mnemonic::from_entropy_in(Language::English, &vec![b'x'; 36]),
+            Err(Error::OutOfBoundBitCount(288))
+        );
+    }
 }
