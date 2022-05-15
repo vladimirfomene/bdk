@@ -32,5 +32,29 @@ pub enum Error {
     OutOfBoundBitCount(usize),
     NotMultipleOf32(usize),
     BadWordCount(usize),
-    WordNotFound
+    InvalidMnemonicWord(&str),
+    InvalidChecksum
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            Error::OutOfBoundBitCount(size) => {
+                write!(f, "The Bit count is not within the minimum and max bit count: {}", size)
+            },
+            Error::NotMultipleOf32(count) => {
+                write!(f, "Bits count {} is not a multiple of 32 as recommended by BIP 39", count)
+            },
+            Error::BadWordCount(count) => {
+                write!(f, "Mnemonic word count {} not supported by BIP 39", count)
+            },
+            Error::InvalidChecksum => {
+                write!(f, "Checksum of provided mnemonic is invalid")
+            },
+            Error::InvalidMnemonicWord(word) => {
+                write!(f, "The word {} does not appear in the word list", word)
+            }
+
+        }
+    }
 }
