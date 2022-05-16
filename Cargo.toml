@@ -33,6 +33,7 @@ rocksdb = { version = "0.14", default-features = false, features = ["snappy"], o
 cc = { version = ">=1.0.64", optional = true }
 socks = { version = "0.3", optional = true }
 lazy_static = { version = "1.4", optional = true }
+unicode-normalization = { version = "0.1.19", optional = true }
 
 bitcoinconsensus = { version = "0.19.0-3", optional = true }
 
@@ -58,7 +59,7 @@ sqlite-bundled = ["sqlite", "rusqlite/bundled"]
 compact_filters = ["rocksdb", "socks", "lazy_static", "cc"]
 key-value-db = ["sled"]
 all-keys = ["keys-bip39"]
-keys-bip39 = []
+keys-bip39 = ["unicode-normalization"]
 rpc = ["bitcoincore-rpc"]
 
 # We currently provide mulitple implementations of `Blockchain`, all are

@@ -1,3 +1,4 @@
+use unicode_normalization::UnicodeNormalization;
 use crate::language::{self, english, Language};
 use crate::util::{
     self, Error, BYTE_SIZE, ENTROPY_MULTIPLE, MAX_NUM_BITS, MAX_WORD_COUNT, MIN_NUM_BITS,
