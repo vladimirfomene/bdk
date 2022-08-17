@@ -55,6 +55,18 @@ pub struct SyncTime {
     pub block_time: BlockTime,
 }
 
+/// Structure encapsulates criteria used for deleting
+/// spent UTXOs
+#[derive(Clone, Debug)]
+pub struct DelCriteria {
+    /// Number of Confirmation on UTXOs to
+    /// make it eligible for deletion
+    pub confirmations: Option<u32>,
+    /// Max number of allowable spent
+    /// UTXOs in the database
+    pub threshold_size: Option<u64>,
+}
+
 /// Trait for operations that can be batched
 ///
 /// This trait defines the list of operations that must be implemented on the [`Database`] type and
@@ -158,6 +170,17 @@ pub trait Database: BatchOperations {
     ///
     /// It should insert and return `0` if not present in the database
     fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, Error>;
+
+    /// Delete UTXOs provided as params, if `spent_utxos` is empty it deletes all spent
+    /// UTXOs in the database.
+    fn del_spent_utxos(&mut self, spent_utxos: Vec<LocalUtxo>) -> Result<Vec<LocalUtxo>, Error>;
+
+    /// Delete UTXOs based on the number of confirmations or
+    /// threshold size (number of spent utxos in DB) defined in [`DelCriteria`]
+    fn del_spent_utxos_by_criteria(
+        &mut self,
+        criteria: DelCriteria,
+    ) -> Result<Vec<LocalUtxo>, Error>;
 }
 
 /// Trait for a database that supports batch operations

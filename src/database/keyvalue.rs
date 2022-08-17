@@ -18,7 +18,7 @@ use bitcoin::hash_types::Txid;
 use bitcoin::{OutPoint, Script, Transaction};
 
 use crate::database::memory::MapKey;
-use crate::database::{BatchDatabase, BatchOperations, Database, SyncTime};
+use crate::database::{BatchDatabase, BatchOperations, Database, DelCriteria, SyncTime};
 use crate::error::Error;
 use crate::types::*;
 
@@ -200,6 +200,29 @@ impl BatchOperations for Batch {
     impl_batch_operations!({}, process_delete_batch);
 }
 
+trait Helpers {
+    fn delete_spent_utxo_set(
+        &mut self,
+        deleted_utxos: &mut Vec<LocalUtxo>,
+        to_del: &[LocalUtxo],
+    ) -> Result<(), Error>;
+}
+
+impl Helpers for Tree {
+    fn delete_spent_utxo_set(
+        &mut self,
+        deleted_utxos: &mut Vec<LocalUtxo>,
+        to_del: &[LocalUtxo],
+    ) -> Result<(), Error> {
+        for spent_utxo in to_del {
+            if let Some(utxo) = self.del_utxo(&spent_utxo.outpoint)? {
+                deleted_utxos.push(utxo);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Database for Tree {
     fn check_descriptor_checksum<B: AsRef<[u8]>>(
         &mut self,
@@ -378,6 +401,66 @@ impl Database for Tree {
             Some(new.to_be_bytes().to_vec())
         })?
         .map_or(Ok(0), ivec_to_u32)
+    }
+
+    fn del_spent_utxos(&mut self, spent_utxos: Vec<LocalUtxo>) -> Result<Vec<LocalUtxo>, Error> {
+        let mut deleted_utxos = vec![];
+
+        if spent_utxos.is_empty() {
+            let all_spent_utxos: Vec<LocalUtxo> = self
+                .iter_utxos()?
+                .into_iter()
+                .filter(|utxo| utxo.is_spent)
+                .collect();
+            self.delete_spent_utxo_set(&mut deleted_utxos, &all_spent_utxos)?;
+        } else {
+            self.delete_spent_utxo_set(&mut deleted_utxos, &spent_utxos)?;
+        }
+
+        Ok(deleted_utxos)
+    }
+
+    fn del_spent_utxos_by_criteria(
+        &mut self,
+        criteria: DelCriteria,
+    ) -> Result<Vec<LocalUtxo>, Error> {
+        let spent_utxos: Vec<LocalUtxo> = self
+            .iter_utxos()?
+            .into_iter()
+            .filter(|utxo| utxo.is_spent)
+            .collect();
+        let spent_utxo_size = spent_utxos.len();
+        if let Some(threshold_size) = criteria.threshold_size {
+            // if the threshold size is smaller than current size, delete everything
+            if threshold_size < spent_utxo_size as u64 {
+                //delete all spent utxos
+                return self.del_spent_utxos(vec![]);
+            }
+        }
+
+        let mut deleted_utxos: Vec<LocalUtxo> = vec![];
+        match self.get_sync_time()? {
+            Some(sync_time) => {
+                for spent_utxo in spent_utxos {
+                    let tx_details = self.get_tx(&spent_utxo.outpoint.txid, false)?;
+                    if let Some(tx_details) = tx_details {
+                        if let Some(confirmation_time) = tx_details.confirmation_time {
+                            if let Some(confirmations) = criteria.confirmations {
+                                if (sync_time.block_time.height - confirmation_time.height)
+                                    < confirmations
+                                {
+                                    //delete it and add to deleted utxos
+                                    self.del_utxo(&spent_utxo.outpoint)?;
+                                    deleted_utxos.push(spent_utxo);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(deleted_utxos)
+            }
+            None => Ok(deleted_utxos),
+        }
     }
 }
 

@@ -255,6 +255,17 @@ impl Database for AnyDatabase {
     fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, Error> {
         impl_inner_method!(AnyDatabase, self, increment_last_index, keychain)
     }
+
+    fn del_spent_utxos(&mut self, spent_utxos: Vec<LocalUtxo>) -> Result<Vec<LocalUtxo>, Error> {
+        impl_inner_method!(AnyDatabase, self, del_spent_utxos, spent_utxos)
+    }
+
+    fn del_spent_utxos_by_criteria(
+        &mut self,
+        criteria: DelCriteria,
+    ) -> Result<Vec<LocalUtxo>, Error> {
+        impl_inner_method!(AnyDatabase, self, del_spent_utxos_by_criteria, criteria)
+    }
 }
 
 impl BatchOperations for AnyBatch {

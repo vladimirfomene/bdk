@@ -15,7 +15,7 @@ use bitcoin::consensus::encode::{deserialize, serialize};
 use bitcoin::hash_types::Txid;
 use bitcoin::{OutPoint, Script, Transaction, TxOut};
 
-use crate::database::{BatchDatabase, BatchOperations, Database, SyncTime};
+use crate::database::{BatchDatabase, BatchOperations, Database, DelCriteria, SyncTime};
 use crate::error::Error;
 use crate::types::*;
 
@@ -334,6 +334,64 @@ impl SqliteDatabase {
         }
 
         Ok(utxos)
+    }
+
+    fn select_spent_utxos(&self) -> Result<Vec<LocalUtxo>, Error> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT value, keychain, vout, txid, script, is_spent FROM utxos WHERE is_spent=:is_spent")?;
+        let mut rows = statement.query(named_params! {":is_spent": true })?;
+        let mut spent_utxos: Vec<LocalUtxo> = vec![];
+        while let Some(row) = rows.next()? {
+            let value = row.get(0)?;
+            let keychain: String = row.get(1)?;
+            let vout = row.get(2)?;
+            let txid: Vec<u8> = row.get(3)?;
+            let script: Vec<u8> = row.get(4)?;
+            let is_spent: bool = row.get(5)?;
+
+            let keychain: KeychainKind = serde_json::from_str(&keychain)?;
+
+            spent_utxos.push(LocalUtxo {
+                outpoint: OutPoint::new(deserialize(&txid)?, vout),
+                txout: TxOut {
+                    value,
+                    script_pubkey: script.into(),
+                },
+                keychain,
+                is_spent,
+            })
+        }
+
+        Ok(spent_utxos)
+    }
+
+    fn count_spent_utxos(&self) -> Result<Option<u64>, Error> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT COUNT(value) FROM utxos WHERE is_spent=:is_spent")?;
+        let mut rows = statement.query(named_params! {":is_spent": true })?;
+
+        if let Some(row) = rows.next()? {
+            let size = row.get(0)?;
+            Ok(size)
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn delete_spent_utxo_set(
+        &mut self,
+        deleted_utxos: &mut Vec<LocalUtxo>,
+        to_del: &Vec<LocalUtxo>,
+    ) -> Result<(), Error> {
+        for spent_utxo in to_del {
+            if let Some(utxo) = self.del_utxo(&spent_utxo.outpoint)? {
+                deleted_utxos.push(utxo);
+            }
+        }
+
+        Ok(())
     }
 
     fn select_utxo_by_outpoint(&self, txid: &[u8], vout: u32) -> Result<Option<LocalUtxo>, Error> {
@@ -894,6 +952,65 @@ impl Database for SqliteDatabase {
                 self.insert_last_derivation_index(keychain_string, 0)?;
                 Ok(0)
             }
+        }
+    }
+
+    fn del_spent_utxos(&mut self, spent_utxos: Vec<LocalUtxo>) -> Result<Vec<LocalUtxo>, Error> {
+        let mut deleted_utxos = vec![];
+        if spent_utxos.is_empty() {
+            let all_spent_utxos = self.select_spent_utxos()?;
+            for spent_utxo in all_spent_utxos {
+                self.delete_utxo_by_outpoint(&spent_utxo.outpoint.txid, spent_utxo.outpoint.vout)?;
+                deleted_utxos.push(spent_utxo);
+            }
+            self.delete_spent_utxo_set(&mut deleted_utxos, &all_spent_utxos)?
+        } else {
+            self.delete_spent_utxo_set(&mut deleted_utxos, &spent_utxos)?
+        }
+
+        Ok(deleted_utxos)
+    }
+
+    fn del_spent_utxos_by_criteria(
+        &mut self,
+        criteria: DelCriteria,
+    ) -> Result<Vec<LocalUtxo>, Error> {
+        if let Some(threshold_size) = criteria.threshold_size {
+            if let Some(spent_utxo_size) = self.count_spent_utxos()? {
+                //if the threshold size is smaller than current size, delete everything
+                if threshold_size < spent_utxo_size {
+                    //delete all spent utxos
+                    return self.del_spent_utxos(vec![]);
+                }
+            }
+        }
+
+        let mut deleted_utxos: Vec<LocalUtxo> = vec![];
+        match self.get_sync_time()? {
+            Some(sync_time) => {
+                let spent_utxos = self.select_spent_utxos()?;
+                for spent_utxo in spent_utxos {
+                    let tx_details =
+                        self.select_transaction_details_by_txid(&spent_utxo.outpoint.txid)?;
+                    if let Some(tx_details) = tx_details {
+                        if let Some(confirmations) = criteria.confirmations {
+                            if let Some(confirmation_time) = tx_details.confirmation_time {
+                                if (sync_time.block_time.height - confirmation_time.height)
+                                    < confirmations
+                                {
+                                    self.delete_utxo_by_outpoint(
+                                        &spent_utxo.outpoint.txid,
+                                        spent_utxo.outpoint.vout,
+                                    )?;
+                                    deleted_utxos.push(spent_utxo);
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(deleted_utxos)
+            }
+            None => Ok(deleted_utxos),
         }
     }
 }
