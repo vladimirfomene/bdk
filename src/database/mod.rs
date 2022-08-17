@@ -55,6 +55,16 @@ pub struct SyncTime {
     pub block_time: BlockTime,
 }
 
+/// Structure encapsulates criteria used for deleting
+/// spent UTXOs
+#[derive(Clone, Debug)]
+pub struct DelCriteria {
+    /// Minimum number of confirmations on UTXOs to make it eligible for deletion
+    pub confirmations: Option<u32>,
+    /// Max number of allowable spent UTXOs in the database
+    pub threshold_size: Option<u64>,
+}
+
 /// Trait for operations that can be batched
 ///
 /// This trait defines the list of operations that must be implemented on the [`Database`] type and
@@ -158,6 +168,108 @@ pub trait Database: BatchOperations {
     ///
     /// It should insert and return `0` if not present in the database
     fn increment_last_index(&mut self, keychain: KeychainKind) -> Result<u32, Error>;
+
+    /// Delete a list of spent utxos from database. Delete all spent utxos if  list is `None`.
+    fn del_spent_utxos(
+        &mut self,
+        to_delete: Option<Vec<OutPoint>>,
+    ) -> Result<Vec<LocalUtxo>, Error> {
+        if let Some(to_delete) = to_delete {
+            let deleted_utxos = to_delete
+                .iter()
+                .filter_map(|out| self.del_utxo(out).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(deleted_utxos)
+        } else {
+            let deleted_utxos = self
+                .iter_utxos()?
+                .iter()
+                .filter(|utxo| utxo.is_spent)
+                .filter_map(|out| self.del_utxo(&out.outpoint).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(deleted_utxos)
+        }
+    }
+
+    /// Delete UTXOs based on the number of confirmations or
+    /// threshold size (number of spent utxos in DB) defined in [`DelCriteria`]
+    fn del_spent_utxos_by_criteria(
+        &mut self,
+        criteria: DelCriteria,
+        current_block_height: Option<u32>,
+    ) -> Result<Vec<LocalUtxo>, Error> {
+        let spent_utxos: Vec<LocalUtxo> = self
+            .iter_utxos()?
+            .into_iter()
+            .filter(|utxo| utxo.is_spent)
+            .collect();
+        let tx_details = spent_utxos
+            .iter()
+            .filter_map(|utxo| self.get_tx(&utxo.outpoint.txid, false).transpose())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let txs_conf_heights = tx_details
+            .iter()
+            .filter_map(|details| details.confirmation_time.as_ref().map(|conf| conf.height))
+            .collect::<Vec<_>>();
+        let utxos_heights: Vec<(&LocalUtxo, &u32)> =
+            spent_utxos.iter().zip(txs_conf_heights.iter()).collect();
+
+        let mut to_delete: Vec<&LocalUtxo> = vec![];
+        let mut failed_confirmation_criteria: Vec<(&LocalUtxo, &u32)> = vec![];
+
+        // Choose all utxos to delete by confirmation criteria.
+        if criteria.confirmations.is_some() {
+            if current_block_height.is_none() {
+                return Err(Error::Generic(String::from(
+                        "You must have a non-None `current_block_height` when using the `confirmations` criteria",
+                    )));
+            }
+
+            // split utxos_heights pair based on confirmation criteria
+            let (pass, fail): (Vec<_>, Vec<_>) =
+                utxos_heights.iter().partition(|(_utxo, height)| {
+                    (current_block_height.unwrap() - **height) >= criteria.confirmations.unwrap()
+                });
+
+            // add utxos that passed confirmation criteria test to `to_delete`
+            to_delete.extend(
+                pass.iter()
+                    .map(|(utxo, _height)| *utxo)
+                    .collect::<Vec<&LocalUtxo>>(),
+            );
+
+            // add utxos that failed the test to `failed_confirmation_criteria`
+            failed_confirmation_criteria.extend(fail.iter());
+        }
+
+        // apply threshold criteria on spent utxos
+        if criteria.threshold_size.is_some() {
+            if failed_confirmation_criteria.is_empty() {
+                failed_confirmation_criteria.extend(utxos_heights.iter());
+            }
+
+            // only select on threshold if there are spent utxos to be deleted
+            if spent_utxos.len() - to_delete.len() > 0 {
+                let qty_to_delete = spent_utxos.len() as u64
+                    - criteria.threshold_size.unwrap()
+                    - to_delete.len() as u64;
+                // sort utxos according to confirmation time
+                failed_confirmation_criteria.sort_by(|a, b| (a.1).cmp(b.1));
+
+                // pick oldest ones to delete.
+                to_delete.extend(
+                    failed_confirmation_criteria
+                        .iter()
+                        .take(qty_to_delete as usize)
+                        .map(|(utxo, _height)| *utxo),
+                );
+            }
+        }
+
+        // delete all the selected spent utxos
+        self.del_spent_utxos(Some(to_delete.iter().map(|utxo| utxo.outpoint).collect()))
+    }
 }
 
 /// Trait for a database that supports batch operations
