@@ -222,8 +222,8 @@ pub trait Database: BatchOperations {
         if criteria.confirmations.is_some() {
             if current_block_height.is_none() {
                 return Err(Error::Generic(String::from(
-                        "You must have a non-None `current_block_height` when using the `confirmations` criteria",
-                    )));
+                    "You must have a non-None `current_block_height` when using the `confirmations` criteria",
+                )));
             }
 
             // split utxos_heights pair based on confirmation criteria
@@ -763,6 +763,286 @@ pub mod test {
         let res = db.check_descriptor_checksum(keychain, checksum);
 
         assert!(res.is_err());
+    }
+
+    pub fn test_del_spent_utxos<D: Database>(mut db: D) {
+        // Query database for utxos, to prove that it is empty
+        assert_eq!(db.iter_utxos().unwrap().len(), 0);
+
+        let (first_utxo, _second_utxo, third_utxo, fourth_utxo) =
+            setup_del_spent_utxo_test(&mut db, false);
+        // test that insertion was successful
+        assert_eq!(db.iter_utxos().unwrap().len(), 4);
+
+        // call del_spent_utxos with None
+        let mut res = db.del_spent_utxos(None).unwrap();
+        res.sort_by(|a, b| a.txout.value.cmp(&b.txout.value));
+        // verify that the one spent utxo has been deleted.
+        assert_eq!(
+            res,
+            vec![first_utxo.clone(), third_utxo.clone(), fourth_utxo.clone()]
+        );
+        assert_eq!(db.iter_utxos().unwrap().len(), 1);
+        // re-insert the deleted utxo into database
+        db.set_utxo(&first_utxo).unwrap();
+        db.set_utxo(&third_utxo).unwrap();
+        db.set_utxo(&fourth_utxo).unwrap();
+
+        // call del_spent_utxos with vector of utxos
+        let mut res = db
+            .del_spent_utxos(Some(vec![
+                first_utxo.outpoint,
+                third_utxo.outpoint,
+                fourth_utxo.outpoint,
+            ]))
+            .unwrap();
+        res.sort_by(|a, b| a.txout.value.cmp(&b.txout.value));
+        assert_eq!(
+            res,
+            vec![first_utxo.clone(), third_utxo.clone(), fourth_utxo.clone()]
+        );
+        assert_eq!(db.iter_utxos().unwrap().len(), 1);
+    }
+
+    pub fn test_del_spent_utxos_by_criteria<D: Database>(mut db: D) {
+        // Query database for utxos, to prove that it is empty
+        assert_eq!(db.iter_utxos().unwrap().len(), 0);
+
+        let (first_utxo, _second_utxo, third_utxo, fourth_utxo) =
+            setup_del_spent_utxo_test(&mut db, true);
+
+        // throw error when using `confirmations` criteria with None `current_block_height`
+        let res = db.del_spent_utxos_by_criteria(
+            DelCriteria {
+                threshold_size: None,
+                confirmations: Some(100),
+            },
+            None,
+        );
+        assert!(res.is_err());
+
+        // delete spent utxos with >= 100 confirmations
+        let mut res = db
+            .del_spent_utxos_by_criteria(
+                DelCriteria {
+                    threshold_size: None,
+                    confirmations: Some(100),
+                },
+                Some(104),
+            )
+            .unwrap();
+
+        assert_eq!(res.len(), 2);
+        res.sort_by(|a, b| a.txout.value.cmp(&b.txout.value));
+        assert_eq!(res, vec![first_utxo.clone(), third_utxo.clone()]);
+
+        db.set_utxo(&first_utxo).unwrap();
+        db.set_utxo(&third_utxo).unwrap();
+
+        // test deleting based on `threshold_size`
+        let mut res = db
+            .del_spent_utxos_by_criteria(
+                DelCriteria {
+                    threshold_size: Some(1),
+                    confirmations: None,
+                },
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(res.len(), 2);
+        // assert deleting picked the two oldest by number of confirmations
+        res.sort_by(|a, b| a.txout.value.cmp(&b.txout.value));
+        assert_eq!(res, vec![first_utxo.clone(), third_utxo.clone()]);
+
+        //query database to confirm that only one item is left and it is the oldest
+        let res = db.del_spent_utxos(None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res.get(0), Some(&fourth_utxo));
+
+        //re-insert utxos
+        db.set_utxo(&first_utxo).unwrap();
+        db.set_utxo(&third_utxo).unwrap();
+        db.set_utxo(&fourth_utxo).unwrap();
+
+        // combining both criterias
+        let mut res = db
+            .del_spent_utxos_by_criteria(
+                DelCriteria {
+                    threshold_size: Some(1),
+                    confirmations: Some(100),
+                },
+                Some(101),
+            )
+            .unwrap();
+        res.sort_by(|a, b| a.txout.value.cmp(&b.txout.value));
+        assert_eq!(res, vec![first_utxo.clone(), third_utxo.clone()])
+    }
+
+    fn setup_del_spent_utxo_test<D: Database>(
+        db: &mut D,
+        by_criteria: bool,
+    ) -> (LocalUtxo, LocalUtxo, LocalUtxo, LocalUtxo) {
+        // insert four utxos into database
+        let first_outpoint = OutPoint::from_str(
+            "c1b4e695098210a31fe02abffe9005cffc051bbe86ff33e173155bcbdc5821e3:0",
+        )
+        .unwrap();
+        let first_script = Script::from(
+            Vec::<u8>::from_hex("76a914db4d1141d0048b1ed15839d0b7a4c488cd368b0e88ac").unwrap(),
+        );
+        let first_txout = TxOut {
+            value: 133742,
+            script_pubkey: first_script,
+        };
+        let first_utxo = LocalUtxo {
+            txout: first_txout,
+            outpoint: first_outpoint,
+            keychain: KeychainKind::External,
+            is_spent: true,
+        };
+
+        db.set_utxo(&first_utxo).unwrap();
+
+        let second_outpoint = OutPoint::from_str(
+            "fc9e4f9c334d55c1dc535bd691a1c159b0f7314c54745522257a905e18a56779:1",
+        )
+        .unwrap();
+
+        let second_script = Script::from(
+            Vec::<u8>::from_hex("76a914824d8a679134215d6d21d25bde3cc63f89ec92eb88ac").unwrap(),
+        );
+
+        let second_txout = TxOut {
+            value: 2257563,
+            script_pubkey: second_script,
+        };
+
+        let second_utxo = LocalUtxo {
+            txout: second_txout,
+            outpoint: second_outpoint,
+            keychain: KeychainKind::External,
+            is_spent: false,
+        };
+
+        db.set_utxo(&second_utxo).unwrap();
+
+        let third_outpoint = OutPoint::from_str(
+            "26e14e606105b250e64849cc14a484ce58f0f7f7064e662862001661b726427b:1",
+        )
+        .unwrap();
+
+        let third_script = Script::from(
+            Vec::<u8>::from_hex("76a9140d5a9a6f7aae31ebb3b72bbfd05935de5765e0e688ac").unwrap(),
+        );
+
+        let third_txout = TxOut {
+            value: 1119096,
+            script_pubkey: third_script,
+        };
+
+        let third_utxo = LocalUtxo {
+            txout: third_txout,
+            outpoint: third_outpoint,
+            keychain: KeychainKind::External,
+            is_spent: true,
+        };
+
+        db.set_utxo(&third_utxo).unwrap();
+
+        let fourth_outpoint = OutPoint::from_str(
+            "d27cff02d45817a11ac01d0d93a2e439f2d643b5d8bc57f4f7f56aa571104e8c:0",
+        )
+        .unwrap();
+
+        let fourth_script = Script::from(
+            Vec::<u8>::from_hex("76a914899490496bfd1228e7ad5b0e156f1fc50a8f6f7688ac").unwrap(),
+        );
+
+        let fourth_txout = TxOut {
+            value: 36662433,
+            script_pubkey: fourth_script,
+        };
+
+        let fourth_utxo = LocalUtxo {
+            txout: fourth_txout,
+            outpoint: fourth_outpoint,
+            keychain: KeychainKind::External,
+            is_spent: true,
+        };
+
+        db.set_utxo(&fourth_utxo).unwrap();
+
+        if by_criteria {
+            // insert four transaction details corresponding to
+            // the utxos above.
+            let hex_tx = Vec::<u8>::from_hex("01000000017967a5185e907a25225574544c31f7b059c1a191d65b53dcc1554d339c4f9efc010000006a47304402206a2eb16b7b92051d0fa38c133e67684ed064effada1d7f925c842da401d4f22702201f196b10e6e4b4a9fff948e5c5d71ec5da53e90529c8dbd122bff2b1d21dc8a90121039b7bcd0824b9a9164f7ba098408e63e5b7e3cf90835cceb19868f54f8961a825ffffffff014baf2100000000001976a914db4d1141d0048b1ed15839d0b7a4c488cd368b0e88ac00000000").unwrap();
+            let tx: Transaction = deserialize(&hex_tx).unwrap();
+
+            let first_tx_details = TransactionDetails {
+                transaction: Some(tx),
+                txid: first_outpoint.txid,
+                received: 123409,
+                sent: 12089221,
+                fee: None,
+                confirmation_time: Some(BlockTime {
+                    height: 1,
+                    timestamp: 2300,
+                }),
+            };
+
+            let hex_tx = Vec::<u8>::from_hex("0100000001e683631b05f0975ae08faa961f7f04ff78e447d6e9aaf2a3c756129c8d5e416e010000006a473044022052d3ecb87afff52af5505111a3998bc3229cf01c87b4e4845d5035addf22696302205ed49c24e2e358c7d9aaf6fe1070dc5abc44c2f60fe66b4921bf1e31bfb05284012102b7cb69ec5400db2382f37d93b4f44e3ed0ffa8ec67ce19875dd65eb39f9656e2ffffffff0284611a00000000001976a914f884901b74ba2ddf5690b790d8b71026b09b4f3e88ac9b722200000000001976a914824d8a679134215d6d21d25bde3cc63f89ec92eb88ac00000000").unwrap();
+            let tx: Transaction = deserialize(&hex_tx).unwrap();
+
+            let second_tx_details = TransactionDetails {
+                transaction: Some(tx),
+                txid: second_outpoint.txid,
+                received: 123409,
+                sent: 12089221,
+                fee: None,
+                confirmation_time: Some(BlockTime {
+                    height: 2,
+                    timestamp: 2300,
+                }),
+            };
+
+            let hex_tx = Vec::<u8>::from_hex("0100000001ad0fbcadb0ccc2fa18f10a51edf30493bf1ac34cfdde74c4738750d39b866d10000000006a47304402200ff42a80137dac2436a97a06d7e2cc8bec0c6586c9dfbb5bea3237716849e034022004a44b16c15732bd358ee5a403d7fc45095b060da5fc73a2859329896803f6e201210332e610a6316a8e40e35f253b721480545720103a5eda2f0913d6d30ffc0464e1ffffffff0201e54104000000001976a9143143aa08466c800b6855171863dc6966fd8c4a7888ac78131100000000001976a9140d5a9a6f7aae31ebb3b72bbfd05935de5765e0e688ac00000000").unwrap();
+            let tx: Transaction = deserialize(&hex_tx).unwrap();
+
+            let third_tx_details = TransactionDetails {
+                transaction: Some(tx),
+                txid: third_outpoint.txid,
+                received: 123409,
+                sent: 12089221,
+                fee: None,
+                confirmation_time: Some(BlockTime {
+                    height: 3,
+                    timestamp: 2300,
+                }),
+            };
+
+            let hex_tx = Vec::<u8>::from_hex("01000000017b4226b76116006228664e06f7f7f058ce84a414cc4948e650b20561604ee126000000006a47304402203a546b99d08183fea83756a11bc656fa887a7920575d058da190d952ef2c03d5022006880e95bb4376be9430c1b85894b5bc22c65738e1564abdf13af62d7162e51f012103e29924d80bb8b828f9af05902e067b4f901f244338954cd48ce9ad224acca4e5ffffffff02a16c2f02000000001976a914899490496bfd1228e7ad5b0e156f1fc50a8f6f7688acb8661202000000001976a9144de7f7fa6aead6469f6439ae271fb31677771afb88ac00000000").unwrap();
+            let tx: Transaction = deserialize(&hex_tx).unwrap();
+
+            let fourth_tx_details = TransactionDetails {
+                transaction: Some(tx),
+                txid: fourth_outpoint.txid,
+                received: 123409,
+                sent: 12089221,
+                fee: None,
+                confirmation_time: Some(BlockTime {
+                    height: 5,
+                    timestamp: 2300,
+                }),
+            };
+
+            db.set_tx(&first_tx_details).unwrap();
+            db.set_tx(&second_tx_details).unwrap();
+            db.set_tx(&third_tx_details).unwrap();
+            db.set_tx(&fourth_tx_details).unwrap();
+        }
+
+        (first_utxo, second_utxo, third_utxo, fourth_utxo)
     }
 
     // TODO: more tests...

@@ -1096,4 +1096,14 @@ pub mod test {
     fn test_check_descriptor_checksum() {
         crate::database::test::test_check_descriptor_checksum(get_database());
     }
+
+    #[test]
+    fn test_del_spent_utxos() {
+        crate::database::test::test_del_spent_utxos(get_database());
+    }
+
+    #[test]
+    fn test_del_spent_utxos_by_criteria() {
+        crate::database::test::test_del_spent_utxos_by_criteria(get_database());
+    }
 }
