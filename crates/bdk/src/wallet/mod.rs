@@ -81,8 +81,7 @@ const COINBASE_MATURITY: u32 = 100;
 /// [`signer`]: crate::signer
 #[derive(Debug)]
 pub struct Wallet<D = ()> {
-    signers: Arc<SignersContainer>,
-    change_signers: Arc<SignersContainer>,
+    signers: BTreeMap<KeychainKind, Arc<SignersContainer>>,
     keychain_tracker: KeychainTracker<KeychainKind, ConfirmationTime>,
     persist: persist::Persist<KeychainKind, ConfirmationTime, D>,
     network: Network,
@@ -200,12 +199,16 @@ impl<D> Wallet<D> {
         let secp = Secp256k1::new();
 
         let mut keychain_tracker = KeychainTracker::default();
+        let mut signers = BTreeMap::new();
         let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &secp, network)
             .map_err(NewError::Descriptor)?;
         keychain_tracker
             .txout_index
             .add_keychain(KeychainKind::External, descriptor.clone());
-        let signers = Arc::new(SignersContainer::build(keymap, &descriptor, &secp));
+        signers.insert(
+            KeychainKind::External,
+            Arc::new(SignersContainer::build(keymap, &descriptor, &secp)),
+        );
         let change_signers = match change_descriptor {
             Some(desc) => {
                 let (change_descriptor, change_keymap) =
@@ -227,6 +230,8 @@ impl<D> Wallet<D> {
             None => Arc::new(SignersContainer::new()),
         };
 
+        signers.insert(KeychainKind::Internal, change_signers.clone());
+
         db.load_into_keychain_tracker(&mut keychain_tracker)
             .map_err(NewError::Persist)?;
 
@@ -234,12 +239,67 @@ impl<D> Wallet<D> {
 
         Ok(Wallet {
             signers,
-            change_signers,
             network,
             persist,
             secp,
             keychain_tracker,
         })
+    }
+
+    pub fn new_with_multi_descriptors<E: IntoWalletDescriptor>(
+        mut db: D,
+        network: Network,
+        descriptors: BTreeMap<KeychainKind, E>,
+    ) -> Result<Self, NewError<D::LoadError>>
+    where
+        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
+    {
+        let secp = Secp256k1::new();
+        let mut keychain_tracker = KeychainTracker::default();
+        let mut signers = BTreeMap::new();
+
+        for (keychain, descriptor) in descriptors {
+            let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &secp, network)
+                .map_err(NewError::Descriptor)?;
+            keychain_tracker
+                .txout_index
+                .add_keychain(keychain.clone(), descriptor.clone());
+            signers.insert(
+                keychain,
+                Arc::new(SignersContainer::build(keymap, &descriptor, &secp)),
+            );
+        }
+
+        db.load_into_keychain_tracker(&mut keychain_tracker)
+            .map_err(NewError::Persist)?;
+
+        let persist = persist::Persist::new(db);
+
+        Ok(Wallet {
+            signers,
+            network,
+            persist,
+            secp,
+            keychain_tracker,
+        })
+    }
+
+    pub fn add_descriptor<E: IntoWalletDescriptor>(
+        &mut self,
+        keychain: KeychainKind,
+        descriptor: E,
+    ) -> Result<(), NewError<D::LoadError>>  where D: persist::PersistBackend<KeychainKind, ConfirmationTime> {
+        let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &self.secp, self.network)
+            .map_err(NewError::Descriptor)?;
+        self.keychain_tracker
+            .txout_index
+            .add_keychain(keychain.clone(), descriptor.clone());
+        self.signers.insert(
+            keychain,
+            Arc::new(SignersContainer::build(keymap, &descriptor, &self.secp)),
+        );
+
+        Ok(())
     }
 
     /// Get the Bitcoin network the wallet is using.
@@ -259,7 +319,7 @@ impl<D> Wallet<D> {
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
     {
-        self._get_address(address_index, KeychainKind::External)
+        self.get_address_by_keychain(address_index, KeychainKind::External)
     }
 
     /// Return a derived address using the internal (change) descriptor.
@@ -273,10 +333,15 @@ impl<D> Wallet<D> {
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
     {
-        self._get_address(address_index, KeychainKind::Internal)
+        self.get_address_by_keychain(address_index, KeychainKind::Internal)
     }
 
-    fn _get_address(&mut self, address_index: AddressIndex, keychain: KeychainKind) -> AddressInfo
+    // TODO: Add documentation
+    pub fn get_address_by_keychain(
+        &mut self,
+        address_index: AddressIndex,
+        keychain: KeychainKind,
+    ) -> AddressInfo
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
     {
@@ -301,7 +366,7 @@ impl<D> Wallet<D> {
                             .expect("must exist")
                             .clone(),
                     ),
-                    _ => return self._get_address(AddressIndex::New, keychain),
+                    _ => return self.get_address_by_keychain(AddressIndex::New, keychain),
                 }
             }
             AddressIndex::Peek(index) => txout_index
@@ -337,6 +402,21 @@ impl<D> Wallet<D> {
     pub fn list_unspent(&self) -> Vec<LocalUtxo> {
         self.keychain_tracker
             .full_utxos()
+            .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
+                outpoint: utxo.outpoint,
+                txout: utxo.txout,
+                keychain,
+                is_spent: false,
+                derivation_index,
+                confirmation_time: utxo.chain_position,
+            })
+            .collect()
+    }
+
+    pub fn list_unspent_by_keychain(&self, keychain: KeychainKind) -> Vec<LocalUtxo> {
+        self.keychain_tracker
+            .full_utxos()
+            .filter(|((k, _), _)| *k == keychain)
             .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
                 outpoint: utxo.outpoint,
                 txout: utxo.txout,
@@ -534,6 +614,10 @@ impl<D> Wallet<D> {
         })
     }
 
+    pub fn get_balance_multi(&self, should_trust: impl FnMut(&KeychainKind) -> bool) -> Balance {
+        self.keychain_tracker.balance(should_trust)
+    }
+
     /// Add an external signer
     ///
     /// See [the `signer` module](signer) for an example.
@@ -543,12 +627,10 @@ impl<D> Wallet<D> {
         ordering: SignerOrdering,
         signer: Arc<dyn TransactionSigner>,
     ) {
-        let signers = match keychain {
-            KeychainKind::External => Arc::make_mut(&mut self.signers),
-            KeychainKind::Internal => Arc::make_mut(&mut self.change_signers),
-        };
-
-        signers.add_external(signer.id(&self.secp), ordering, signer);
+        if let Some(signers) = self.signers.get_mut(&keychain) {
+            let signers = Arc::make_mut(signers);
+            signers.add_external(signer.id(&self.secp), ordering, signer);
+        }
     }
 
     /// Get the signers
@@ -567,10 +649,11 @@ impl<D> Wallet<D> {
     /// Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn get_signers(&self, keychain: KeychainKind) -> Arc<SignersContainer> {
-        match keychain {
-            KeychainKind::External => Arc::clone(&self.signers),
-            KeychainKind::Internal => Arc::clone(&self.change_signers),
-        }
+        let signers = self
+            .signers
+            .get(&keychain)
+            .expect("KeychainKind does not have signers in wallet");
+        Arc::clone(signers)
     }
 
     /// Start building a transaction.
@@ -627,15 +710,25 @@ impl<D> Wallet<D> {
             .keychains()
             .get(&KeychainKind::Internal);
 
+        // TODO: Don't know if the right thing here is to unwrap. This will work with the statusquo descriptor implementation.
         let external_policy = external_descriptor
-            .extract_policy(&self.signers, BuildSatisfaction::None, &self.secp)?
+            .extract_policy(
+                self.signers.get(&KeychainKind::External).unwrap(),
+                BuildSatisfaction::None,
+                &self.secp,
+            )?
             .unwrap();
+        // TODO: Don't know if the right thing here is to unwrap. This will work with the statusquo descriptor implementation.
         let internal_policy = internal_descriptor
             .as_ref()
             .map(|desc| {
                 Ok::<_, Error>(
-                    desc.extract_policy(&self.change_signers, BuildSatisfaction::None, &self.secp)?
-                        .unwrap(),
+                    desc.extract_policy(
+                        self.signers.get(&KeychainKind::Internal).unwrap(),
+                        BuildSatisfaction::None,
+                        &self.secp,
+                    )?
+                    .unwrap(),
                 )
             })
             .transpose()?;
@@ -1196,12 +1289,7 @@ impl<D> Wallet<D> {
             return Err(Error::Signer(signer::SignerError::NonStandardSighash));
         }
 
-        for signer in self
-            .signers
-            .signers()
-            .iter()
-            .chain(self.change_signers.signers().iter())
-        {
+        for signer in self.signers.iter().flat_map(|(_, signer)| signer.signers()) {
             signer.sign_transaction(psbt, &sign_options, &self.secp)?;
         }
 
@@ -1215,9 +1303,9 @@ impl<D> Wallet<D> {
 
     /// Return the spending policies for the wallet's descriptor
     pub fn policies(&self, keychain: KeychainKind) -> Result<Option<Policy>, Error> {
-        let signers = match keychain {
-            KeychainKind::External => &self.signers,
-            KeychainKind::Internal => &self.change_signers,
+        let signers = match self.signers.get(&keychain) {
+            Some(signers) => signers,
+            None => return Ok(None),
         };
 
         match self.public_descriptor(keychain) {
