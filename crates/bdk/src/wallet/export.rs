@@ -116,8 +116,9 @@ impl FullyNodedExport {
         label: &str,
         include_blockheight: bool,
     ) -> Result<Self, &'static str> {
+        //TODO: handle the case where get_descriptor_for_keychain returns None
         let descriptor = wallet
-            .get_descriptor_for_keychain(KeychainKind::External)
+            .get_descriptor_for_keychain(KeychainKind::External).unwrap()
             .to_string_with_secret(
                 &wallet
                     .get_signers(KeychainKind::External)
@@ -145,8 +146,9 @@ impl FullyNodedExport {
         let change_descriptor = match wallet.public_descriptor(KeychainKind::Internal).is_some() {
             false => None,
             true => {
+                //TODO: handle the case where get_descriptor_for_keychain returns None
                 let descriptor = wallet
-                    .get_descriptor_for_keychain(KeychainKind::Internal)
+                    .get_descriptor_for_keychain(KeychainKind::Internal).unwrap()
                     .to_string_with_secret(
                         &wallet
                             .get_signers(KeychainKind::Internal)

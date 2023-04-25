@@ -156,13 +156,13 @@ impl Vbytes for usize {
 ///
 /// [`Wallet`]: crate::Wallet
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct LocalUtxo {
+pub struct LocalUtxo<K> {
     /// Reference to a transaction output
     pub outpoint: OutPoint,
     /// Transaction output
     pub txout: TxOut,
     /// Type of keychain
-    pub keychain: KeychainKind,
+    pub keychain: K,
     /// Whether this UTXO is spent or not
     pub is_spent: bool,
     /// The derivation index for the script pubkey in the wallet
@@ -173,21 +173,21 @@ pub struct LocalUtxo {
 
 /// A [`Utxo`] with its `satisfaction_weight`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WeightedUtxo {
+pub struct WeightedUtxo<K> {
     /// The weight of the witness data and `scriptSig` expressed in [weight units]. This is used to
     /// properly maintain the feerate when adding this input to a transaction during coin selection.
     ///
     /// [weight units]: https://en.bitcoin.it/wiki/Weight_units
     pub satisfaction_weight: usize,
     /// The UTXO
-    pub utxo: Utxo,
+    pub utxo: Utxo<K>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// An unspent transaction output (UTXO).
-pub enum Utxo {
+pub enum Utxo<K> {
     /// A UTXO owned by the local wallet.
-    Local(LocalUtxo),
+    Local(LocalUtxo<K>),
     /// A UTXO owned by another wallet.
     Foreign {
         /// The location of the output.
@@ -198,7 +198,7 @@ pub enum Utxo {
     },
 }
 
-impl Utxo {
+impl<K> Utxo<K> {
     /// Get the location of the UTXO
     pub fn outpoint(&self) -> OutPoint {
         match &self {

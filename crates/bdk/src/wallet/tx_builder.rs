@@ -283,7 +283,8 @@ impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, 
                 .collect::<Result<Vec<_>, _>>()?;
 
             for utxo in utxos {
-                let descriptor = wallet.get_descriptor_for_keychain(utxo.keychain);
+                //TODO: handle the case where get_descriptor_for_keychain returns None
+                let descriptor = wallet.get_descriptor_for_keychain(utxo.keychain).unwrap();
                 let satisfaction_weight = descriptor.max_satisfaction_weight().unwrap();
                 self.params.utxos.push(WeightedUtxo {
                     satisfaction_weight,

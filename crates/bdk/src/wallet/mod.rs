@@ -34,7 +34,7 @@ use bitcoin::{
 };
 use core::fmt;
 use core::ops::Deref;
-use miniscript::psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier};
+use miniscript::{psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier}};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace};
@@ -79,11 +79,13 @@ const COINBASE_MATURITY: u32 = 100;
 /// 2. [`signer`]s that can contribute signatures to addresses instantiated from the descriptors.
 ///
 /// [`signer`]: crate::signer
+// TODO: I don't think KeychainKind should serve as an identifier for keychains. It should be 
+// there to tell us if a keychain is internal or external.
 #[derive(Debug)]
-pub struct Wallet<D = ()> {
-    signers: BTreeMap<KeychainKind, Arc<SignersContainer>>,
-    keychain_tracker: KeychainTracker<KeychainKind, ConfirmationTime>,
-    persist: persist::Persist<KeychainKind, ConfirmationTime, D>,
+pub struct Wallet<D = (), K = KeychainKind> {
+    signers: BTreeMap<K, Arc<SignersContainer>>,
+    keychain_tracker: KeychainTracker<K, ConfirmationTime>,
+    persist: persist::Persist<K, ConfirmationTime, D>,
     network: Network,
     secp: SecpCtx,
 }
@@ -121,16 +123,16 @@ pub enum AddressIndex {
 /// A derived address and the index it was found at.
 /// For convenience this automatically derefs to `Address`
 #[derive(Debug, PartialEq, Eq)]
-pub struct AddressInfo {
+pub struct AddressInfo<K> {
     /// Child index of this address
     pub index: u32,
     /// Address
     pub address: Address,
     /// Type of keychain
-    pub keychain: KeychainKind,
+    pub keychain: K,
 }
 
-impl Deref for AddressInfo {
+impl<K> Deref for AddressInfo<K> {
     type Target = Address;
 
     fn deref(&self) -> &Self::Target {
@@ -138,7 +140,7 @@ impl Deref for AddressInfo {
     }
 }
 
-impl fmt::Display for AddressInfo {
+impl<K> fmt::Display for AddressInfo<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.address)
     }
@@ -246,76 +248,15 @@ impl<D> Wallet<D> {
         })
     }
 
-    pub fn new_with_multi_descriptors<E: IntoWalletDescriptor>(
-        mut db: D,
-        network: Network,
-        descriptors: BTreeMap<KeychainKind, E>,
-    ) -> Result<Self, NewError<D::LoadError>>
-    where
-        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
-    {
-        let secp = Secp256k1::new();
-        let mut keychain_tracker = KeychainTracker::default();
-        let mut signers = BTreeMap::new();
-
-        for (keychain, descriptor) in descriptors {
-            let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &secp, network)
-                .map_err(NewError::Descriptor)?;
-            keychain_tracker
-                .txout_index
-                .add_keychain(keychain.clone(), descriptor.clone());
-            signers.insert(
-                keychain,
-                Arc::new(SignersContainer::build(keymap, &descriptor, &secp)),
-            );
-        }
-
-        db.load_into_keychain_tracker(&mut keychain_tracker)
-            .map_err(NewError::Persist)?;
-
-        let persist = persist::Persist::new(db);
-
-        Ok(Wallet {
-            signers,
-            network,
-            persist,
-            secp,
-            keychain_tracker,
-        })
-    }
-
-    pub fn add_descriptor<E: IntoWalletDescriptor>(
-        &mut self,
-        keychain: KeychainKind,
-        descriptor: E,
-    ) -> Result<(), NewError<D::LoadError>>  where D: persist::PersistBackend<KeychainKind, ConfirmationTime> {
-        let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &self.secp, self.network)
-            .map_err(NewError::Descriptor)?;
-        self.keychain_tracker
-            .txout_index
-            .add_keychain(keychain.clone(), descriptor.clone());
-        self.signers.insert(
-            keychain,
-            Arc::new(SignersContainer::build(keymap, &descriptor, &self.secp)),
-        );
-
-        Ok(())
-    }
-
     /// Get the Bitcoin network the wallet is using.
     pub fn network(&self) -> Network {
         self.network
     }
 
-    /// Iterator over all keychains in this wallet
-    pub fn keychanins(&self) -> &BTreeMap<KeychainKind, ExtendedDescriptor> {
-        self.keychain_tracker.txout_index.keychains()
-    }
-
     /// Return a derived address using the external descriptor, see [`AddressIndex`] for
     /// available address index selection strategies. If none of the keys in the descriptor are derivable
     /// (i.e. does not end with /*) then the same address will always be returned for any [`AddressIndex`].
-    pub fn get_address(&mut self, address_index: AddressIndex) -> AddressInfo
+    pub fn get_address(&mut self, address_index: AddressIndex) -> AddressInfo<KeychainKind>
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
     {
@@ -329,58 +270,11 @@ impl<D> Wallet<D> {
     /// see [`AddressIndex`] for available address index selection strategies. If none of the keys
     /// in the descriptor are derivable (i.e. does not end with /*) then the same address will always
     /// be returned for any [`AddressIndex`].
-    pub fn get_internal_address(&mut self, address_index: AddressIndex) -> AddressInfo
+    pub fn get_internal_address(&mut self, address_index: AddressIndex) -> AddressInfo<KeychainKind>
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
     {
         self.get_address_by_keychain(address_index, KeychainKind::Internal)
-    }
-
-    // TODO: Add documentation
-    pub fn get_address_by_keychain(
-        &mut self,
-        address_index: AddressIndex,
-        keychain: KeychainKind,
-    ) -> AddressInfo
-    where
-        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
-    {
-        let keychain = self.map_keychain(keychain);
-        let txout_index = &mut self.keychain_tracker.txout_index;
-        let (index, spk) = match address_index {
-            AddressIndex::New => {
-                let ((index, spk), changeset) = txout_index.reveal_next_spk(&keychain);
-                let spk = spk.clone();
-
-                self.persist.stage(changeset.into());
-                self.persist.commit().expect("TODO");
-                (index, spk)
-            }
-            AddressIndex::LastUnused => {
-                let index = txout_index.last_revealed_index(&keychain);
-                match index {
-                    Some(index) if !txout_index.is_used(&(keychain, index)) => (
-                        index,
-                        txout_index
-                            .spk_at_index(&(keychain, index))
-                            .expect("must exist")
-                            .clone(),
-                    ),
-                    _ => return self.get_address_by_keychain(AddressIndex::New, keychain),
-                }
-            }
-            AddressIndex::Peek(index) => txout_index
-                .spks_of_keychain(&keychain)
-                .take(index as usize + 1)
-                .last()
-                .unwrap(),
-        };
-        AddressInfo {
-            index,
-            address: Address::from_script(&spk, self.network)
-                .expect("descriptor must have address form"),
-            keychain,
-        }
     }
 
     /// Return whether or not a `script` is part of this wallet (either internal or external)
@@ -413,21 +307,6 @@ impl<D> Wallet<D> {
             .collect()
     }
 
-    pub fn list_unspent_by_keychain(&self, keychain: KeychainKind) -> Vec<LocalUtxo> {
-        self.keychain_tracker
-            .full_utxos()
-            .filter(|((k, _), _)| *k == keychain)
-            .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
-                outpoint: utxo.outpoint,
-                txout: utxo.txout,
-                keychain,
-                is_spent: false,
-                derivation_index,
-                confirmation_time: utxo.chain_position,
-            })
-            .collect()
-    }
-
     /// Get all the checkpoints the wallet is currently storing indexed by height.
     pub fn checkpoints(&self) -> &BTreeMap<u32, BlockHash> {
         self.keychain_tracker.chain().checkpoints()
@@ -436,34 +315,6 @@ impl<D> Wallet<D> {
     /// Returns the latest checkpoint.
     pub fn latest_checkpoint(&self) -> Option<BlockId> {
         self.keychain_tracker.chain().latest_checkpoint()
-    }
-
-    /// Returns a iterators of all the script pubkeys for the `Internal` and External` variants in `KeychainKind`.
-    ///
-    /// This is inteded to be used when doing a full scan of your addresses (e.g. after restoring
-    /// from seed words). You pass the `BTreeMap` of iterators to a blockchain data source (e.g.
-    /// electrum server) which will go through each address until it reaches a *stop grap*.
-    ///
-    /// Note carefully that iterators go over **all** script pubkeys on the keychains (not what
-    /// script pubkeys the wallet is storing internally).
-    pub fn spks_of_all_keychains(
-        &self,
-    ) -> BTreeMap<KeychainKind, impl Iterator<Item = (u32, Script)> + Clone> {
-        self.keychain_tracker.txout_index.spks_of_all_keychains()
-    }
-
-    /// Gets an iterator over all the script pubkeys in a single keychain.
-    ///
-    /// See [`spks_of_all_keychains`] for more documentation
-    ///
-    /// [`spks_of_all_keychains`]: Self::spks_of_all_keychains
-    pub fn spks_of_keychain(
-        &self,
-        keychain: KeychainKind,
-    ) -> impl Iterator<Item = (u32, Script)> + Clone {
-        self.keychain_tracker
-            .txout_index
-            .spks_of_keychain(&keychain)
     }
 
     /// Returns the utxo owned by this wallet corresponding to `outpoint` if it exists in the
@@ -594,17 +445,6 @@ impl<D> Wallet<D> {
             .collect()
     }
 
-    /// Iterate over the transactions in the wallet in order of ascending confirmation time with
-    /// unconfirmed transactions last.
-    pub fn transactions(
-        &self,
-    ) -> impl DoubleEndedIterator<Item = (ConfirmationTime, &Transaction)> + '_ {
-        self.keychain_tracker
-            .chain_graph()
-            .transactions_in_chain()
-            .map(|(pos, tx)| (*pos, tx))
-    }
-
     /// Return the balance, separated into available, trusted-pending, untrusted-pending and immature
     /// values.
     pub fn get_balance(&self) -> Balance {
@@ -612,48 +452,6 @@ impl<D> Wallet<D> {
             KeychainKind::External => false,
             KeychainKind::Internal => true,
         })
-    }
-
-    pub fn get_balance_multi(&self, should_trust: impl FnMut(&KeychainKind) -> bool) -> Balance {
-        self.keychain_tracker.balance(should_trust)
-    }
-
-    /// Add an external signer
-    ///
-    /// See [the `signer` module](signer) for an example.
-    pub fn add_signer(
-        &mut self,
-        keychain: KeychainKind,
-        ordering: SignerOrdering,
-        signer: Arc<dyn TransactionSigner>,
-    ) {
-        if let Some(signers) = self.signers.get_mut(&keychain) {
-            let signers = Arc::make_mut(signers);
-            signers.add_external(signer.id(&self.secp), ordering, signer);
-        }
-    }
-
-    /// Get the signers
-    ///
-    /// ## Example
-    ///
-    /// ```
-    /// # use bdk::{Wallet, KeychainKind};
-    /// # use bdk::bitcoin::Network;
-    /// let wallet = Wallet::new_no_persist("wpkh(tprv8ZgxMBicQKsPe73PBRSmNbTfbcsZnwWhz5eVmhHpi31HW29Z7mc9B4cWGRQzopNUzZUT391DeDJxL2PefNunWyLgqCKRMDkU1s2s8bAfoSk/84'/0'/0'/0/*)", None, Network::Testnet)?;
-    /// for secret_key in wallet.get_signers(KeychainKind::External).signers().iter().filter_map(|s| s.descriptor_secret_key()) {
-    ///     // secret_key: tprv8ZgxMBicQKsPe73PBRSmNbTfbcsZnwWhz5eVmhHpi31HW29Z7mc9B4cWGRQzopNUzZUT391DeDJxL2PefNunWyLgqCKRMDkU1s2s8bAfoSk/84'/0'/0'/0/*
-    ///     println!("secret_key: {}", secret_key);
-    /// }
-    ///
-    /// Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn get_signers(&self, keychain: KeychainKind) -> Arc<SignersContainer> {
-        let signers = self
-            .signers
-            .get(&keychain)
-            .expect("KeychainKind does not have signers in wallet");
-        Arc::clone(signers)
     }
 
     /// Start building a transaction.
@@ -1153,8 +951,9 @@ impl<D> Wallet<D> {
 
                 let weighted_utxo = match txout_index.index_of_spk(&txout.script_pubkey) {
                     Some(&(keychain, derivation_index)) => {
+                        //TODO: handle the case where get_descriptor_for_keychain returns None
                         let satisfaction_weight = self
-                            .get_descriptor_for_keychain(keychain)
+                            .get_descriptor_for_keychain(keychain).unwrap()
                             .max_satisfaction_weight()
                             .unwrap();
                         WeightedUtxo {
@@ -1301,27 +1100,6 @@ impl<D> Wallet<D> {
         }
     }
 
-    /// Return the spending policies for the wallet's descriptor
-    pub fn policies(&self, keychain: KeychainKind) -> Result<Option<Policy>, Error> {
-        let signers = match self.signers.get(&keychain) {
-            Some(signers) => signers,
-            None => return Ok(None),
-        };
-
-        match self.public_descriptor(keychain) {
-            Some(desc) => Ok(desc.extract_policy(signers, BuildSatisfaction::None, &self.secp)?),
-            None => Ok(None),
-        }
-    }
-
-    /// Return the "public" version of the wallet's descriptor, meaning a new descriptor that has
-    /// the same structure but with every secret key removed
-    ///
-    /// This can be used to build a watch-only version of a wallet
-    pub fn public_descriptor(&self, keychain: KeychainKind) -> Option<&ExtendedDescriptor> {
-        self.keychain_tracker.txout_index.keychains().get(&keychain)
-    }
-
     /// Finalize a PSBT, i.e., for each input determine if sufficient data is available to pass
     /// validation and construct the respective `scriptSig` or `scriptWitness`. Please refer to
     /// [BIP174](https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki#Input_Finalizer)
@@ -1426,25 +1204,6 @@ impl<D> Wallet<D> {
         &self.secp
     }
 
-    /// Returns the descriptor used to create addresses for a particular `keychain`.
-    pub fn get_descriptor_for_keychain(&self, keychain: KeychainKind) -> &ExtendedDescriptor {
-        self.public_descriptor(self.map_keychain(keychain))
-            .expect("we mapped it to external if it doesn't exist")
-    }
-
-    /// The derivation index of this wallet. It will return `None` if it has not derived any addresses.
-    /// Otherwise, it will return the index of the highest address it has derived.
-    pub fn derivation_index(&self, keychain: KeychainKind) -> Option<u32> {
-        self.keychain_tracker
-            .txout_index
-            .last_revealed_index(&keychain)
-    }
-
-    /// The index of the next address that you would get if you were to ask the wallet for a new address
-    pub fn next_derivation_index(&self, keychain: KeychainKind) -> u32 {
-        self.keychain_tracker.txout_index.next_index(&keychain).0
-    }
-
     /// Informs the wallet that you no longer intend to broadcast a tx that was built from it.
     ///
     /// This frees up the change address used when creating the tx for use in future transactions.
@@ -1460,22 +1219,13 @@ impl<D> Wallet<D> {
         }
     }
 
-    fn map_keychain(&self, keychain: KeychainKind) -> KeychainKind {
-        if keychain == KeychainKind::Internal
-            && self.public_descriptor(KeychainKind::Internal).is_none()
-        {
-            KeychainKind::External
-        } else {
-            keychain
-        }
-    }
-
     fn get_descriptor_for_txout(&self, txout: &TxOut) -> Option<DerivedDescriptor> {
         let &(keychain, child) = self
             .keychain_tracker
             .txout_index
             .index_of_spk(&txout.script_pubkey)?;
-        let descriptor = self.get_descriptor_for_keychain(keychain);
+        //TODO: handle the case where get_descriptor_for_keychain returns None
+        let descriptor = self.get_descriptor_for_keychain(keychain).unwrap();
         Some(descriptor.at_derivation_index(child))
     }
 
@@ -1486,7 +1236,8 @@ impl<D> Wallet<D> {
                 let keychain = utxo.keychain;
                 (
                     utxo,
-                    self.get_descriptor_for_keychain(keychain)
+                    //TODO: handle the case where get_descriptor_for_keychain returns None
+                    self.get_descriptor_for_keychain(keychain).unwrap()
                         .max_satisfaction_weight()
                         .unwrap(),
                 )
@@ -1688,7 +1439,8 @@ impl<D> Wallet<D> {
             ..psbt::Input::default()
         };
 
-        let desc = self.get_descriptor_for_keychain(keychain);
+        //TODO: Handle the case where get_descriptor_for_keychain returns None
+        let desc = self.get_descriptor_for_keychain(keychain).unwrap();
         let derived_descriptor = desc.at_derivation_index(child);
 
         psbt_input
@@ -1739,7 +1491,8 @@ impl<D> Wallet<D> {
                     index, keychain, child
                 );
 
-                let desc = self.get_descriptor_for_keychain(keychain);
+                // TODO: handle the None case.
+                let desc = self.get_descriptor_for_keychain(keychain).unwrap();
                 let desc = desc.at_derivation_index(child);
 
                 if is_input {
@@ -1753,18 +1506,6 @@ impl<D> Wallet<D> {
         }
 
         Ok(())
-    }
-
-    /// Return the checksum of the public descriptor associated to `keychain`
-    ///
-    /// Internally calls [`Self::get_descriptor_for_keychain`] to fetch the right descriptor
-    pub fn descriptor_checksum(&self, keychain: KeychainKind) -> String {
-        self.get_descriptor_for_keychain(keychain)
-            .to_string()
-            .split_once('#')
-            .unwrap()
-            .1
-            .to_string()
     }
 
     /// Applies an update to the wallet and stages the changes (but does not [`commit`] them).
@@ -1807,6 +1548,284 @@ impl<D> Wallet<D> {
     /// Get a reference to the inner [`ChainGraph`](bdk_chain::chain_graph::ChainGraph).
     pub fn as_chain_graph(&self) -> &bdk_chain::chain_graph::ChainGraph<ConfirmationTime> {
         self.keychain_tracker.chain_graph()
+    }
+
+    fn map_keychain(&self, keychain: KeychainKind) -> KeychainKind {
+        if keychain == KeychainKind::Internal
+            && self.public_descriptor(KeychainKind::Internal).is_none()
+        {
+            KeychainKind::External
+        } else {
+            keychain
+        }
+    }
+}
+
+
+
+
+
+impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord, D: persist::PersistBackend<K, ConfirmationTime> { 
+    // TODO: add documentation and shorten constructor name.
+    pub fn new_with_multi_descriptors<E: IntoWalletDescriptor>(
+        mut db: D,
+        network: Network,
+        descriptors: BTreeMap<K, E>,
+    ) -> Result<Self, NewError<D::LoadError>>
+    where
+        D: persist::PersistBackend<K, ConfirmationTime>,
+    {
+        let secp = Secp256k1::new();
+        let mut keychain_tracker = KeychainTracker::default();
+        let mut signers = BTreeMap::new();
+
+
+        for (keychain, descriptor) in descriptors {
+            let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &secp, network)
+                .map_err(NewError::Descriptor)?;
+            keychain_tracker
+                .txout_index
+                .add_keychain(keychain.clone(), descriptor.clone());
+            signers.insert(
+                keychain,
+                Arc::new(SignersContainer::build(keymap, &descriptor, &secp)),
+            );
+        }
+
+        db.load_into_keychain_tracker(&mut keychain_tracker)
+            .map_err(NewError::Persist)?;
+
+        let persist = persist::Persist::new(db);
+
+        Ok(Wallet {
+            signers,
+            network,
+            persist,
+            secp,
+            keychain_tracker,
+        })
+    }
+
+    pub fn add_descriptor<E: IntoWalletDescriptor>(
+        &mut self,
+        keychain: K,
+        descriptor: E,
+    ) -> Result<(), NewError<D::LoadError>>  where D: persist::PersistBackend<K, ConfirmationTime> {
+        let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &self.secp, self.network)
+            .map_err(NewError::Descriptor)?;
+        self.keychain_tracker
+            .txout_index
+            .add_keychain(keychain.clone(), descriptor.clone());
+        self.signers.insert(
+            keychain,
+            Arc::new(SignersContainer::build(keymap, &descriptor, &self.secp)),
+        );
+
+        Ok(())
+    }
+
+    /// Iterator over all keychains in this wallet
+    pub fn keychanins(&self) -> &BTreeMap<K, ExtendedDescriptor> {
+        self.keychain_tracker.txout_index.keychains()
+    }
+
+    // TODO: Add documentation
+    pub fn get_address_by_keychain(
+        &mut self,
+        address_index: AddressIndex,
+        keychain: K,
+    ) -> AddressInfo<K>
+    where
+        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
+    {
+        //let keychain = self.map_keychain(keychain);
+        //TODO: check if keychain exists before carrying on
+        let txout_index = &mut self.keychain_tracker.txout_index;
+        let (index, spk) = match address_index {
+            AddressIndex::New => {
+                let ((index, spk), changeset) = txout_index.reveal_next_spk(&keychain);
+                let spk = spk.clone();
+
+                self.persist.stage(changeset.into());
+                self.persist.commit().expect("TODO");
+                (index, spk)
+            }
+            AddressIndex::LastUnused => {
+                let index = txout_index.last_revealed_index(&keychain);
+                match index {
+                    Some(index) if !txout_index.is_used(&(keychain, index)) => (
+                        index,
+                        txout_index
+                            .spk_at_index(&(keychain, index))
+                            .expect("must exist")
+                            .clone(),
+                    ),
+                    _ => return self.get_address_by_keychain(AddressIndex::New, keychain),
+                }
+            }
+            AddressIndex::Peek(index) => txout_index
+                .spks_of_keychain(&keychain)
+                .take(index as usize + 1)
+                .last()
+                .unwrap(),
+        };
+        AddressInfo {
+            index,
+            address: Address::from_script(&spk, self.network)
+                .expect("descriptor must have address form"),
+            keychain,
+        }
+    }
+
+    pub fn list_unspent_by_keychain(&self, keychain: K) -> Vec<LocalUtxo<K>> {
+        self.keychain_tracker
+            .full_utxos()
+            .filter(|((k, _), _)| *k == keychain)
+            .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
+                outpoint: utxo.outpoint,
+                txout: utxo.txout,
+                keychain,
+                is_spent: false,
+                derivation_index,
+                confirmation_time: utxo.chain_position,
+            })
+            .collect()
+    }
+
+    /// Returns a iterators of all the script pubkeys for the `Internal` and External` variants in `KeychainKind`.
+    ///
+    /// This is inteded to be used when doing a full scan of your addresses (e.g. after restoring
+    /// from seed words). You pass the `BTreeMap` of iterators to a blockchain data source (e.g.
+    /// electrum server) which will go through each address until it reaches a *stop grap*.
+    ///
+    /// Note carefully that iterators go over **all** script pubkeys on the keychains (not what
+    /// script pubkeys the wallet is storing internally).
+    pub fn spks_of_all_keychains(
+        &self,
+    ) -> BTreeMap<K, impl Iterator<Item = (u32, Script)> + Clone> {
+        self.keychain_tracker.txout_index.spks_of_all_keychains()
+    }
+
+    /// Gets an iterator over all the script pubkeys in a single keychain.
+    ///
+    /// See [`spks_of_all_keychains`] for more documentation
+    ///
+    /// [`spks_of_all_keychains`]: Self::spks_of_all_keychains
+    pub fn spks_of_keychain(
+        &self,
+        keychain: K,
+    ) -> impl Iterator<Item = (u32, Script)> + Clone {
+        self.keychain_tracker
+            .txout_index
+            .spks_of_keychain(&keychain)
+    }
+
+    /// Iterate over the transactions in the wallet in order of ascending confirmation time with
+    /// unconfirmed transactions last.
+    pub fn transactions(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (ConfirmationTime, &Transaction)> + '_ {
+        self.keychain_tracker
+            .chain_graph()
+            .transactions_in_chain()
+            .map(|(pos, tx)| (*pos, tx))
+    }
+
+    /// Return the balance, separated into available, trusted-pending, untrusted-pending and immature
+    /// values.
+    pub fn get_balance_by_keychain(&self, keychain: K) -> Balance {
+        //TODO: implement a `get_balance_by_keychain` method on keychain_tracker which should just be a wrapper around the existing `get_balance` method.
+        self.keychain_tracker.get_balance_by_keychain(keychain)
+    }
+
+    /// Add an external signer
+    ///
+    /// See [the `signer` module](signer) for an example.
+    pub fn add_signer(
+        &mut self,
+        keychain: K,
+        ordering: SignerOrdering,
+        signer: Arc<dyn TransactionSigner>,
+    ) {
+        if let Some(signers) = self.signers.get_mut(&keychain) {
+            let signers = Arc::make_mut(signers);
+            signers.add_external(signer.id(&self.secp), ordering, signer);
+        }
+    }
+
+    /// Get the signers
+    ///
+    /// ## Example
+    ///
+    /// ```
+    /// # use bdk::{Wallet, KeychainKind};
+    /// # use bdk::bitcoin::Network;
+    /// let wallet = Wallet::new_no_persist("wpkh(tprv8ZgxMBicQKsPe73PBRSmNbTfbcsZnwWhz5eVmhHpi31HW29Z7mc9B4cWGRQzopNUzZUT391DeDJxL2PefNunWyLgqCKRMDkU1s2s8bAfoSk/84'/0'/0'/0/*)", None, Network::Testnet)?;
+    /// for secret_key in wallet.get_signers(KeychainKind::External).signers().iter().filter_map(|s| s.descriptor_secret_key()) {
+    ///     // secret_key: tprv8ZgxMBicQKsPe73PBRSmNbTfbcsZnwWhz5eVmhHpi31HW29Z7mc9B4cWGRQzopNUzZUT391DeDJxL2PefNunWyLgqCKRMDkU1s2s8bAfoSk/84'/0'/0'/0/*
+    ///     println!("secret_key: {}", secret_key);
+    /// }
+    ///
+    /// Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn get_signers(&self, keychain: K) -> Arc<SignersContainer> {
+        let signers = self
+            .signers
+            .get(&keychain)
+            .expect("KeychainKind does not have signers in wallet");
+        Arc::clone(signers)
+    }
+
+    /// Return the spending policies for the wallet's descriptor
+    pub fn policies(&self, keychain: K) -> Result<Option<Policy>, Error> {
+        let signers = match self.signers.get(&keychain) {
+            Some(signers) => signers,
+            None => return Ok(None),
+        };
+
+        match self.public_descriptor(keychain) {
+            Some(desc) => Ok(desc.extract_policy(signers, BuildSatisfaction::None, &self.secp)?),
+            None => Ok(None),
+        }
+    }
+
+    /// Return the "public" version of the wallet's descriptor, meaning a new descriptor that has
+    /// the same structure but with every secret key removed
+    ///
+    /// This can be used to build a watch-only version of a wallet
+    pub fn public_descriptor(&self, keychain: K) -> Option<&ExtendedDescriptor> {
+        self.keychain_tracker.txout_index.keychains().get(&keychain)
+    }
+
+     /// Returns the descriptor used to create addresses for a particular `keychain`.
+     pub fn get_descriptor_for_keychain(&self, keychain: K) -> Option<&ExtendedDescriptor> {
+        self.public_descriptor(keychain)
+    }
+
+    /// The derivation index of this wallet. It will return `None` if it has not derived any addresses.
+    /// Otherwise, it will return the index of the highest address it has derived.
+    pub fn derivation_index(&self, keychain: K) -> Option<u32> {
+        self.keychain_tracker
+            .txout_index
+            .last_revealed_index(&keychain)
+    }
+
+    /// The index of the next address that you would get if you were to ask the wallet for a new address
+    pub fn next_derivation_index(&self, keychain: K) -> u32 {
+        self.keychain_tracker.txout_index.next_index(&keychain).0
+    }
+
+    /// Return the checksum of the public descriptor associated to `keychain`
+    ///
+    /// Internally calls [`Self::get_descriptor_for_keychain`] to fetch the right descriptor
+    pub fn descriptor_checksum(&self, keychain: K) -> String {
+        // TODO: do not unwrap, properly handle None case.
+        self.get_descriptor_for_keychain(keychain).unwrap()
+            .to_string()
+            .split_once('#')
+            .unwrap()
+            .1
+            .to_string()
     }
 }
 
