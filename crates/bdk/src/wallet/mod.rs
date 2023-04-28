@@ -293,7 +293,7 @@ impl<D> Wallet<D> {
     }
 
     /// Return the list of unspent outputs of this wallet
-    pub fn list_unspent(&self) -> Vec<LocalUtxo> {
+    pub fn list_unspent(&self) -> Vec<LocalUtxo<KeychainKind>> {
         self.keychain_tracker
             .full_utxos()
             .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
@@ -315,27 +315,6 @@ impl<D> Wallet<D> {
     /// Returns the latest checkpoint.
     pub fn latest_checkpoint(&self) -> Option<BlockId> {
         self.keychain_tracker.chain().latest_checkpoint()
-    }
-
-    /// Returns the utxo owned by this wallet corresponding to `outpoint` if it exists in the
-    /// wallet's database.
-    pub fn get_utxo(&self, op: OutPoint) -> Option<LocalUtxo> {
-        self.keychain_tracker
-            .full_utxos()
-            .find_map(|(&(keychain, derivation_index), txo)| {
-                if op == txo.outpoint {
-                    Some(LocalUtxo {
-                        outpoint: txo.outpoint,
-                        txout: txo.txout,
-                        keychain,
-                        is_spent: txo.spent_by.is_none(),
-                        derivation_index,
-                        confirmation_time: txo.chain_position,
-                    })
-                } else {
-                    None
-                }
-            })
     }
 
     /// Return a single transactions made and received by the wallet
@@ -479,7 +458,7 @@ impl<D> Wallet<D> {
     /// ```
     ///
     /// [`TxBuilder`]: crate::TxBuilder
-    pub fn build_tx(&mut self) -> TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, CreateTx> {
+    pub fn build_tx(&mut self) -> TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, CreateTx, KeychainKind> {
         TxBuilder {
             wallet: alloc::rc::Rc::new(core::cell::RefCell::new(self)),
             params: TxParams::default(),
@@ -488,10 +467,10 @@ impl<D> Wallet<D> {
         }
     }
 
-    pub(crate) fn create_tx<Cs: coin_selection::CoinSelectionAlgorithm>(
+    pub(crate) fn create_tx<Cs: coin_selection::CoinSelectionAlgorithm<KeychainKind>>(
         &mut self,
         coin_selection: Cs,
-        params: TxParams,
+        params: TxParams<KeychainKind>,
     ) -> Result<(psbt::PartiallySignedTransaction, TransactionDetails), Error>
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
@@ -909,7 +888,7 @@ impl<D> Wallet<D> {
     pub fn build_fee_bump(
         &mut self,
         txid: Txid,
-    ) -> Result<TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, BumpFee>, Error> {
+    ) -> Result<TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, BumpFee, KeychainKind>, Error> {
         let graph = self.keychain_tracker.graph();
         let txout_index = &self.keychain_tracker.txout_index;
         let tx_and_height = self.keychain_tracker.chain_graph().get_tx_in_chain(txid);
@@ -1229,7 +1208,7 @@ impl<D> Wallet<D> {
         Some(descriptor.at_derivation_index(child))
     }
 
-    fn get_available_utxos(&self) -> Vec<(LocalUtxo, usize)> {
+    fn get_available_utxos(&self) -> Vec<(LocalUtxo<KeychainKind>, usize)> {
         self.list_unspent()
             .into_iter()
             .map(|utxo| {
@@ -1252,12 +1231,12 @@ impl<D> Wallet<D> {
         &self,
         change_policy: tx_builder::ChangeSpendPolicy,
         unspendable: &HashSet<OutPoint>,
-        manually_selected: Vec<WeightedUtxo>,
+        manually_selected: Vec<WeightedUtxo<KeychainKind>>,
         must_use_all_available: bool,
         manual_only: bool,
         must_only_use_confirmed_tx: bool,
         current_height: Option<u32>,
-    ) -> (Vec<WeightedUtxo>, Vec<WeightedUtxo>) {
+    ) -> (Vec<WeightedUtxo<KeychainKind>>, Vec<WeightedUtxo<KeychainKind>>) {
         //    must_spend <- manually selected utxos
         //    may_spend  <- all other available utxos
         let mut may_spend = self.get_available_utxos();
@@ -1340,8 +1319,8 @@ impl<D> Wallet<D> {
     fn complete_transaction(
         &self,
         tx: Transaction,
-        selected: Vec<Utxo>,
-        params: TxParams,
+        selected: Vec<Utxo<KeychainKind>>,
+        params: TxParams<KeychainKind>,
     ) -> Result<psbt::PartiallySignedTransaction, Error> {
         let mut psbt = psbt::PartiallySignedTransaction::from_unsigned_tx(tx)?;
 
@@ -1422,7 +1401,7 @@ impl<D> Wallet<D> {
     /// get the corresponding PSBT Input for a LocalUtxo
     pub fn get_psbt_input(
         &self,
-        utxo: LocalUtxo,
+        utxo: LocalUtxo<KeychainKind>,
         sighash_type: Option<psbt::PsbtSighashType>,
         only_witness_utxo: bool,
     ) -> Result<psbt::Input, Error> {
@@ -1565,7 +1544,7 @@ impl<D> Wallet<D> {
 
 
 
-impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord, D: persist::PersistBackend<K, ConfirmationTime> { 
+impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord { 
     // TODO: add documentation and shorten constructor name.
     pub fn new_with_multi_descriptors<E: IntoWalletDescriptor>(
         mut db: D,
@@ -1636,7 +1615,7 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord, D: persist::Per
         keychain: K,
     ) -> AddressInfo<K>
     where
-        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
+        D: persist::PersistBackend<K, ConfirmationTime>,
     {
         //let keychain = self.map_keychain(keychain);
         //TODO: check if keychain exists before carrying on
@@ -1826,6 +1805,27 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord, D: persist::Per
             .unwrap()
             .1
             .to_string()
+    }
+
+    /// Returns the utxo owned by this wallet corresponding to `outpoint` if it exists in the
+    /// wallet's database.
+    pub fn get_utxo(&self, op: OutPoint) -> Option<LocalUtxo<K>> {
+        self.keychain_tracker
+            .full_utxos()
+            .find_map(|(&(keychain, derivation_index), txo)| {
+                if op == txo.outpoint {
+                    Some(LocalUtxo {
+                        outpoint: txo.outpoint,
+                        txout: txo.txout,
+                        keychain,
+                        is_spent: txo.spent_by.is_none(),
+                        derivation_index,
+                        confirmation_time: txo.chain_position,
+                    })
+                } else {
+                    None
+                }
+            })
     }
 }
 

@@ -118,9 +118,9 @@ impl TxBuilderContext for BumpFee {}
 /// [`finish`]: Self::finish
 /// [`coin_selection`]: Self::coin_selection
 #[derive(Debug)]
-pub struct TxBuilder<'a, D, Cs, Ctx> {
-    pub(crate) wallet: Rc<RefCell<&'a mut Wallet<D>>>,
-    pub(crate) params: TxParams,
+pub struct TxBuilder<'a, D, Cs, Ctx, K> {
+    pub(crate) wallet: Rc<RefCell<&'a mut Wallet<D, K>>>,
+    pub(crate) params: TxParams<K>,
     pub(crate) coin_selection: Cs,
     pub(crate) phantom: PhantomData<Ctx>,
 }
@@ -128,14 +128,14 @@ pub struct TxBuilder<'a, D, Cs, Ctx> {
 /// The parameters for transaction creation sans coin selection algorithm.
 //TODO: TxParams should eventually be exposed publicly.
 #[derive(Default, Debug, Clone)]
-pub(crate) struct TxParams {
+pub(crate) struct TxParams<K> {
     pub(crate) recipients: Vec<(Script, u64)>,
     pub(crate) drain_wallet: bool,
     pub(crate) drain_to: Option<Script>,
     pub(crate) fee_policy: Option<FeePolicy>,
     pub(crate) internal_policy_path: Option<BTreeMap<String, Vec<usize>>>,
     pub(crate) external_policy_path: Option<BTreeMap<String, Vec<usize>>>,
-    pub(crate) utxos: Vec<WeightedUtxo>,
+    pub(crate) utxos: Vec<WeightedUtxo<K>>,
     pub(crate) unspendable: HashSet<OutPoint>,
     pub(crate) manually_selected_only: bool,
     pub(crate) sighash: Option<psbt::PsbtSighashType>,
@@ -170,7 +170,7 @@ impl Default for FeePolicy {
     }
 }
 
-impl<'a, D, Cs: Clone, Ctx> Clone for TxBuilder<'a, D, Cs, Ctx> {
+impl<'a, D, Cs: Clone, Ctx, K: Ord + Clone + core::fmt::Debug> Clone for TxBuilder<'a, D, Cs, Ctx, K> {
     fn clone(&self) -> Self {
         TxBuilder {
             wallet: self.wallet.clone(),
@@ -182,7 +182,7 @@ impl<'a, D, Cs: Clone, Ctx> Clone for TxBuilder<'a, D, Cs, Ctx> {
 }
 
 // methods supported by both contexts, for any CoinSelectionAlgorithm
-impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, Cs, Ctx> {
+impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, Cs, Ctx, K> {
     /// Set a custom fee rate
     pub fn fee_rate(&mut self, fee_rate: FeeRate) -> &mut Self {
         self.params.fee_policy = Some(FeePolicy::FeeRate(fee_rate));
@@ -254,6 +254,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, 
     ///
     /// # Ok::<(), bdk::Error>(())
     /// ```
+    // TODO: Update this to work multi-descriptor wallet.
     pub fn policy_path(
         &mut self,
         policy_path: BTreeMap<String, Vec<usize>>,
@@ -508,10 +509,10 @@ impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, 
     /// Overrides the [`DefaultCoinSelectionAlgorithm`](super::coin_selection::DefaultCoinSelectionAlgorithm).
     ///
     /// Note that this function consumes the builder and returns it so it is usually best to put this as the first call on the builder.
-    pub fn coin_selection<P: CoinSelectionAlgorithm>(
+    pub fn coin_selection<P: CoinSelectionAlgorithm<K>>(
         self,
         coin_selection: P,
-    ) -> TxBuilder<'a, D, P, Ctx> {
+    ) -> TxBuilder<'a, D, P, Ctx, K> {
         TxBuilder {
             wallet: self.wallet,
             params: self.params,
@@ -527,7 +528,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, 
     /// [`BIP174`]: https://github.com/bitcoin/bips/blob/master/bip-0174.mediawiki
     pub fn finish(self) -> Result<(Psbt, TransactionDetails), Error>
     where
-        D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
+        D: persist::PersistBackend<K, ConfirmationTime>,
     {
         self.wallet
             .borrow_mut()
@@ -579,7 +580,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext> TxBuilder<'a, D, 
     }
 }
 
-impl<'a, D, Cs: CoinSelectionAlgorithm> TxBuilder<'a, D, Cs, CreateTx> {
+impl<'a, D, Cs: CoinSelectionAlgorithm<K>, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, Cs, CreateTx, K> {
     /// Replace the recipients already added with a new list
     pub fn set_recipients(&mut self, recipients: Vec<(Script, u64)>) -> &mut Self {
         self.params.recipients = recipients;
@@ -650,7 +651,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm> TxBuilder<'a, D, Cs, CreateTx> {
 }
 
 // methods supported only by bump_fee
-impl<'a, D> TxBuilder<'a, D, DefaultCoinSelectionAlgorithm, BumpFee> {
+impl<'a, D, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, DefaultCoinSelectionAlgorithm, BumpFee, K> {
     /// Explicitly tells the wallet that it is allowed to reduce the amount of the output matching this
     /// `script_pubkey` in order to bump the transaction fee. Without specifying this the wallet
     /// will attempt to find a change output to shrink instead.
@@ -750,6 +751,7 @@ impl RbfValue {
     }
 }
 
+//TODO: maybe need to update this in the advent of a multi-descriptor wallet.
 /// Policy regarding the use of change outputs when creating a transaction
 #[derive(Debug, Ord, PartialOrd, Eq, PartialEq, Hash, Clone, Copy)]
 pub enum ChangeSpendPolicy {
@@ -767,8 +769,9 @@ impl Default for ChangeSpendPolicy {
     }
 }
 
+
 impl ChangeSpendPolicy {
-    pub(crate) fn is_satisfied_by(&self, utxo: &LocalUtxo) -> bool {
+    pub(crate) fn is_satisfied_by(&self, utxo: &LocalUtxo<KeychainKind>) -> bool {
         match self {
             ChangeSpendPolicy::ChangeAllowed => true,
             ChangeSpendPolicy::OnlyChange => utxo.keychain == KeychainKind::Internal,
@@ -870,7 +873,7 @@ mod test {
         assert_eq!(tx.output[2].script_pubkey, From::from(vec![0xAA, 0xEE]));
     }
 
-    fn get_test_utxos() -> Vec<LocalUtxo> {
+    fn get_test_utxos() -> Vec<LocalUtxo<KeychainKind>> {
         use bitcoin::hashes::Hash;
 
         vec![
