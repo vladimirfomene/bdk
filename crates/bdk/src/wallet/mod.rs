@@ -34,7 +34,7 @@ use bitcoin::{
 };
 use core::fmt;
 use core::ops::Deref;
-use miniscript::{psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier}};
+use miniscript::psbt::{PsbtExt, PsbtInputExt, PsbtInputSatisfier};
 
 #[allow(unused_imports)]
 use log::{debug, error, info, trace};
@@ -79,7 +79,7 @@ const COINBASE_MATURITY: u32 = 100;
 /// 2. [`signer`]s that can contribute signatures to addresses instantiated from the descriptors.
 ///
 /// [`signer`]: crate::signer
-// TODO: I don't think KeychainKind should serve as an identifier for keychains. It should be 
+// TODO: I don't think KeychainKind should serve as an identifier for keychains. It should be
 // there to tell us if a keychain is internal or external.
 #[derive(Debug)]
 pub struct Wallet<D = (), K = KeychainKind> {
@@ -292,21 +292,6 @@ impl<D> Wallet<D> {
         self.keychain_tracker.txout_index.index_of_spk(spk).copied()
     }
 
-    /// Return the list of unspent outputs of this wallet
-    pub fn list_unspent(&self) -> Vec<LocalUtxo<KeychainKind>> {
-        self.keychain_tracker
-            .full_utxos()
-            .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
-                outpoint: utxo.outpoint,
-                txout: utxo.txout,
-                keychain,
-                is_spent: false,
-                derivation_index,
-                confirmation_time: utxo.chain_position,
-            })
-            .collect()
-    }
-
     /// Get all the checkpoints the wallet is currently storing indexed by height.
     pub fn checkpoints(&self) -> &BTreeMap<u32, BlockHash> {
         self.keychain_tracker.chain().checkpoints()
@@ -458,7 +443,9 @@ impl<D> Wallet<D> {
     /// ```
     ///
     /// [`TxBuilder`]: crate::TxBuilder
-    pub fn build_tx(&mut self) -> TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, CreateTx, KeychainKind> {
+    pub fn build_tx(
+        &mut self,
+    ) -> TxBuilder<'_, D, KeychainKind, DefaultCoinSelectionAlgorithm, CreateTx> {
         TxBuilder {
             wallet: alloc::rc::Rc::new(core::cell::RefCell::new(self)),
             params: TxParams::default(),
@@ -467,10 +454,10 @@ impl<D> Wallet<D> {
         }
     }
 
-    pub(crate) fn create_tx<Cs: coin_selection::CoinSelectionAlgorithm<KeychainKind>>(
+    pub(crate) fn create_tx<Cs: coin_selection::CoinSelectionAlgorithm>(
         &mut self,
         coin_selection: Cs,
-        params: TxParams<KeychainKind>,
+        params: TxParams,
     ) -> Result<(psbt::PartiallySignedTransaction, TransactionDetails), Error>
     where
         D: persist::PersistBackend<KeychainKind, ConfirmationTime>,
@@ -888,7 +875,7 @@ impl<D> Wallet<D> {
     pub fn build_fee_bump(
         &mut self,
         txid: Txid,
-    ) -> Result<TxBuilder<'_, D, DefaultCoinSelectionAlgorithm, BumpFee, KeychainKind>, Error> {
+    ) -> Result<TxBuilder<'_, D, KeychainKind, DefaultCoinSelectionAlgorithm, BumpFee>, Error> {
         let graph = self.keychain_tracker.graph();
         let txout_index = &self.keychain_tracker.txout_index;
         let tx_and_height = self.keychain_tracker.chain_graph().get_tx_in_chain(txid);
@@ -932,14 +919,15 @@ impl<D> Wallet<D> {
                     Some(&(keychain, derivation_index)) => {
                         //TODO: handle the case where get_descriptor_for_keychain returns None
                         let satisfaction_weight = self
-                            .get_descriptor_for_keychain(keychain).unwrap()
+                            .get_descriptor_for_keychain(keychain)
+                            .unwrap()
                             .max_satisfaction_weight()
                             .unwrap();
                         WeightedUtxo {
                             utxo: Utxo::Local(LocalUtxo {
                                 outpoint: txin.previous_output,
                                 txout: txout.clone(),
-                                keychain,
+                                //keychain,
                                 is_spent: true,
                                 derivation_index,
                                 confirmation_time,
@@ -1208,15 +1196,15 @@ impl<D> Wallet<D> {
         Some(descriptor.at_derivation_index(child))
     }
 
-    fn get_available_utxos(&self) -> Vec<(LocalUtxo<KeychainKind>, usize)> {
+    fn get_available_utxos(&self) -> Vec<(LocalUtxo, usize)> {
         self.list_unspent()
             .into_iter()
-            .map(|utxo| {
-                let keychain = utxo.keychain;
+            .map(|(utxo, keychain)| {
                 (
                     utxo,
                     //TODO: handle the case where get_descriptor_for_keychain returns None
-                    self.get_descriptor_for_keychain(keychain).unwrap()
+                    self.get_descriptor_for_keychain(keychain)
+                        .unwrap()
                         .max_satisfaction_weight()
                         .unwrap(),
                 )
@@ -1231,12 +1219,12 @@ impl<D> Wallet<D> {
         &self,
         change_policy: tx_builder::ChangeSpendPolicy,
         unspendable: &HashSet<OutPoint>,
-        manually_selected: Vec<WeightedUtxo<KeychainKind>>,
+        manually_selected: Vec<WeightedUtxo>,
         must_use_all_available: bool,
         manual_only: bool,
         must_only_use_confirmed_tx: bool,
         current_height: Option<u32>,
-    ) -> (Vec<WeightedUtxo<KeychainKind>>, Vec<WeightedUtxo<KeychainKind>>) {
+    ) -> (Vec<WeightedUtxo>, Vec<WeightedUtxo>) {
         //    must_spend <- manually selected utxos
         //    may_spend  <- all other available utxos
         let mut may_spend = self.get_available_utxos();
@@ -1319,8 +1307,8 @@ impl<D> Wallet<D> {
     fn complete_transaction(
         &self,
         tx: Transaction,
-        selected: Vec<Utxo<KeychainKind>>,
-        params: TxParams<KeychainKind>,
+        selected: Vec<Utxo>,
+        params: TxParams,
     ) -> Result<psbt::PartiallySignedTransaction, Error> {
         let mut psbt = psbt::PartiallySignedTransaction::from_unsigned_tx(tx)?;
 
@@ -1401,7 +1389,7 @@ impl<D> Wallet<D> {
     /// get the corresponding PSBT Input for a LocalUtxo
     pub fn get_psbt_input(
         &self,
-        utxo: LocalUtxo<KeychainKind>,
+        utxo: LocalUtxo,
         sighash_type: Option<psbt::PsbtSighashType>,
         only_witness_utxo: bool,
     ) -> Result<psbt::Input, Error> {
@@ -1540,11 +1528,29 @@ impl<D> Wallet<D> {
     }
 }
 
+impl<D, K> Wallet<D, K>
+where
+    K: core::fmt::Debug + Clone + Ord,
+{
+    /// Return the list of unspent outputs of this wallet
+    pub fn list_unspent(&self) -> Vec<(LocalUtxo, K)> {
+        self.keychain_tracker
+            .full_utxos()
+            .map(|(&(keychain, derivation_index), utxo)| {
+                (
+                    LocalUtxo {
+                        outpoint: utxo.outpoint,
+                        txout: utxo.txout,
+                        is_spent: false,
+                        derivation_index,
+                        confirmation_time: utxo.chain_position,
+                    },
+                    keychain,
+                )
+            })
+            .collect()
+    }
 
-
-
-
-impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord { 
     // TODO: add documentation and shorten constructor name.
     pub fn new_with_multi_descriptors<E: IntoWalletDescriptor>(
         mut db: D,
@@ -1557,7 +1563,6 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
         let secp = Secp256k1::new();
         let mut keychain_tracker = KeychainTracker::default();
         let mut signers = BTreeMap::new();
-
 
         for (keychain, descriptor) in descriptors {
             let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &secp, network)
@@ -1589,9 +1594,13 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
         &mut self,
         keychain: K,
         descriptor: E,
-    ) -> Result<(), NewError<D::LoadError>>  where D: persist::PersistBackend<K, ConfirmationTime> {
-        let (descriptor, keymap) = into_wallet_descriptor_checked(descriptor, &self.secp, self.network)
-            .map_err(NewError::Descriptor)?;
+    ) -> Result<(), NewError<D::LoadError>>
+    where
+        D: persist::PersistBackend<K, ConfirmationTime>,
+    {
+        let (descriptor, keymap) =
+            into_wallet_descriptor_checked(descriptor, &self.secp, self.network)
+                .map_err(NewError::Descriptor)?;
         self.keychain_tracker
             .txout_index
             .add_keychain(keychain.clone(), descriptor.clone());
@@ -1606,6 +1615,27 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
     /// Iterator over all keychains in this wallet
     pub fn keychanins(&self) -> &BTreeMap<K, ExtendedDescriptor> {
         self.keychain_tracker.txout_index.keychains()
+    }
+
+    // /// Returns the utxo owned by this wallet corresponding to `outpoint` if it exists in the
+    // /// wallet's database.
+    pub fn get_utxo(&self, op: OutPoint) -> Option<LocalUtxo> {
+        self.keychain_tracker
+            .full_utxos()
+            .find_map(|(&(keychain, derivation_index), txo)| {
+                if op == txo.outpoint {
+                    Some(LocalUtxo {
+                        outpoint: txo.outpoint,
+                        txout: txo.txout,
+                        //keychain,
+                        is_spent: txo.spent_by.is_none(),
+                        derivation_index,
+                        confirmation_time: txo.chain_position,
+                    })
+                } else {
+                    None
+                }
+            })
     }
 
     // TODO: Add documentation
@@ -1656,14 +1686,14 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
         }
     }
 
-    pub fn list_unspent_by_keychain(&self, keychain: K) -> Vec<LocalUtxo<K>> {
+    pub fn list_unspent_by_keychain(&self, keychain: K) -> Vec<LocalUtxo> {
         self.keychain_tracker
             .full_utxos()
             .filter(|((k, _), _)| *k == keychain)
             .map(|(&(keychain, derivation_index), utxo)| LocalUtxo {
                 outpoint: utxo.outpoint,
                 txout: utxo.txout,
-                keychain,
+                //keychain,
                 is_spent: false,
                 derivation_index,
                 confirmation_time: utxo.chain_position,
@@ -1690,10 +1720,7 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
     /// See [`spks_of_all_keychains`] for more documentation
     ///
     /// [`spks_of_all_keychains`]: Self::spks_of_all_keychains
-    pub fn spks_of_keychain(
-        &self,
-        keychain: K,
-    ) -> impl Iterator<Item = (u32, Script)> + Clone {
+    pub fn spks_of_keychain(&self, keychain: K) -> impl Iterator<Item = (u32, Script)> + Clone {
         self.keychain_tracker
             .txout_index
             .spks_of_keychain(&keychain)
@@ -1710,12 +1737,13 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
             .map(|(pos, tx)| (*pos, tx))
     }
 
-    /// Return the balance, separated into available, trusted-pending, untrusted-pending and immature
-    /// values.
-    pub fn get_balance_by_keychain(&self, keychain: K) -> Balance {
-        //TODO: implement a `get_balance_by_keychain` method on keychain_tracker which should just be a wrapper around the existing `get_balance` method.
-        self.keychain_tracker.get_balance_by_keychain(keychain)
-    }
+    // TODO: Commented out as `get_balance_by_keychain` isn't implemented on the tracker yet.
+    // /// Return the balance, separated into available, trusted-pending, untrusted-pending and immature
+    // /// values.
+    // pub fn get_balance_by_keychain(&self, keychain: K) -> Balance {
+    //     //TODO: implement a `get_balance_by_keychain` method on keychain_tracker which should just be a wrapper around the existing `get_balance` method.
+    //     self.keychain_tracker.get_balance_by_keychain(keychain)
+    // }
 
     /// Add an external signer
     ///
@@ -1776,8 +1804,8 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
         self.keychain_tracker.txout_index.keychains().get(&keychain)
     }
 
-     /// Returns the descriptor used to create addresses for a particular `keychain`.
-     pub fn get_descriptor_for_keychain(&self, keychain: K) -> Option<&ExtendedDescriptor> {
+    /// Returns the descriptor used to create addresses for a particular `keychain`.
+    pub fn get_descriptor_for_keychain(&self, keychain: K) -> Option<&ExtendedDescriptor> {
         self.public_descriptor(keychain)
     }
 
@@ -1799,33 +1827,13 @@ impl<D, K> Wallet<D, K> where K: core::fmt::Debug + Clone + Ord {
     /// Internally calls [`Self::get_descriptor_for_keychain`] to fetch the right descriptor
     pub fn descriptor_checksum(&self, keychain: K) -> String {
         // TODO: do not unwrap, properly handle None case.
-        self.get_descriptor_for_keychain(keychain).unwrap()
+        self.get_descriptor_for_keychain(keychain)
+            .unwrap()
             .to_string()
             .split_once('#')
             .unwrap()
             .1
             .to_string()
-    }
-
-    /// Returns the utxo owned by this wallet corresponding to `outpoint` if it exists in the
-    /// wallet's database.
-    pub fn get_utxo(&self, op: OutPoint) -> Option<LocalUtxo<K>> {
-        self.keychain_tracker
-            .full_utxos()
-            .find_map(|(&(keychain, derivation_index), txo)| {
-                if op == txo.outpoint {
-                    Some(LocalUtxo {
-                        outpoint: txo.outpoint,
-                        txout: txo.txout,
-                        keychain,
-                        is_spent: txo.spent_by.is_none(),
-                        derivation_index,
-                        confirmation_time: txo.chain_position,
-                    })
-                } else {
-                    None
-                }
-            })
     }
 }
 
