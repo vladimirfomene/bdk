@@ -41,6 +41,7 @@ use crate::collections::HashSet;
 use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
 use bdk_chain::ConfirmationTime;
 use core::cell::RefCell;
+use core::fmt::Debug;
 use core::marker::PhantomData;
 
 use bitcoin::util::psbt::{self, PartiallySignedTransaction as Psbt};
@@ -118,9 +119,9 @@ impl TxBuilderContext for BumpFee {}
 /// [`finish`]: Self::finish
 /// [`coin_selection`]: Self::coin_selection
 #[derive(Debug)]
-pub struct TxBuilder<'a, D, Cs, Ctx, K> {
+pub struct TxBuilder<'a, D, K, Cs, Ctx> {
     pub(crate) wallet: Rc<RefCell<&'a mut Wallet<D, K>>>,
-    pub(crate) params: TxParams<K>,
+    pub(crate) params: TxParams,
     pub(crate) coin_selection: Cs,
     pub(crate) phantom: PhantomData<Ctx>,
 }
@@ -128,14 +129,14 @@ pub struct TxBuilder<'a, D, Cs, Ctx, K> {
 /// The parameters for transaction creation sans coin selection algorithm.
 //TODO: TxParams should eventually be exposed publicly.
 #[derive(Default, Debug, Clone)]
-pub(crate) struct TxParams<K> {
+pub(crate) struct TxParams {
     pub(crate) recipients: Vec<(Script, u64)>,
     pub(crate) drain_wallet: bool,
     pub(crate) drain_to: Option<Script>,
     pub(crate) fee_policy: Option<FeePolicy>,
     pub(crate) internal_policy_path: Option<BTreeMap<String, Vec<usize>>>,
     pub(crate) external_policy_path: Option<BTreeMap<String, Vec<usize>>>,
-    pub(crate) utxos: Vec<WeightedUtxo<K>>,
+    pub(crate) utxos: Vec<WeightedUtxo>,
     pub(crate) unspendable: HashSet<OutPoint>,
     pub(crate) manually_selected_only: bool,
     pub(crate) sighash: Option<psbt::PsbtSighashType>,
@@ -170,7 +171,7 @@ impl Default for FeePolicy {
     }
 }
 
-impl<'a, D, Cs: Clone, Ctx, K: Ord + Clone + core::fmt::Debug> Clone for TxBuilder<'a, D, Cs, Ctx, K> {
+impl<'a, D, K: Clone, Cs: Clone, Ctx> Clone for TxBuilder<'a, D, K, Cs, Ctx> {
     fn clone(&self) -> Self {
         TxBuilder {
             wallet: self.wallet.clone(),
@@ -182,7 +183,9 @@ impl<'a, D, Cs: Clone, Ctx, K: Ord + Clone + core::fmt::Debug> Clone for TxBuild
 }
 
 // methods supported by both contexts, for any CoinSelectionAlgorithm
-impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, Cs, Ctx, K> {
+impl<'a, D, K: Clone + Ord + Debug, Cs: CoinSelectionAlgorithm, Ctx: TxBuilderContext>
+    TxBuilder<'a, D, K, Cs, Ctx>
+{
     /// Set a custom fee rate
     pub fn fee_rate(&mut self, fee_rate: FeeRate) -> &mut Self {
         self.params.fee_policy = Some(FeePolicy::FeeRate(fee_rate));
@@ -275,17 +278,20 @@ impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone
     ///
     /// These have priority over the "unspendable" utxos, meaning that if a utxo is present both in
     /// the "utxos" and the "unspendable" list, it will be spent.
-    pub fn add_utxos(&mut self, outpoints: &[OutPoint]) -> Result<&mut Self, Error> {
+    pub fn add_utxos(&mut self, outpoints: &[(OutPoint, K)]) -> Result<&mut Self, Error> {
         {
             let wallet = self.wallet.borrow();
             let utxos = outpoints
                 .iter()
-                .map(|outpoint| wallet.get_utxo(*outpoint).ok_or(Error::UnknownUtxo))
+                .map(|(outpoint, keychain)| {
+                    let utxo = wallet.get_utxo(*outpoint).ok_or(Error::UnknownUtxo)?;
+                    Ok::<(LocalUtxo, K), Error>((utxo, *keychain))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            for utxo in utxos {
+            for (utxo, keychain) in utxos {
                 //TODO: handle the case where get_descriptor_for_keychain returns None
-                let descriptor = wallet.get_descriptor_for_keychain(utxo.keychain).unwrap();
+                let descriptor = wallet.get_descriptor_for_keychain(keychain).unwrap();
                 let satisfaction_weight = descriptor.max_satisfaction_weight().unwrap();
                 self.params.utxos.push(WeightedUtxo {
                     satisfaction_weight,
@@ -301,8 +307,8 @@ impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone
     ///
     /// These have priority over the "unspendable" utxos, meaning that if a utxo is present both in
     /// the "utxos" and the "unspendable" list, it will be spent.
-    pub fn add_utxo(&mut self, outpoint: OutPoint) -> Result<&mut Self, Error> {
-        self.add_utxos(&[outpoint])
+    pub fn add_utxo(&mut self, outpoint: OutPoint, keychain: K) -> Result<&mut Self, Error> {
+        self.add_utxos(&[(outpoint, keychain)])
     }
 
     /// Add a foreign UTXO i.e. a UTXO not owned by this wallet.
@@ -509,10 +515,10 @@ impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone
     /// Overrides the [`DefaultCoinSelectionAlgorithm`](super::coin_selection::DefaultCoinSelectionAlgorithm).
     ///
     /// Note that this function consumes the builder and returns it so it is usually best to put this as the first call on the builder.
-    pub fn coin_selection<P: CoinSelectionAlgorithm<K>>(
+    pub fn coin_selection<P: CoinSelectionAlgorithm>(
         self,
         coin_selection: P,
-    ) -> TxBuilder<'a, D, P, Ctx, K> {
+    ) -> TxBuilder<'a, D, K, P, Ctx> {
         TxBuilder {
             wallet: self.wallet,
             params: self.params,
@@ -580,7 +586,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm<K>, Ctx: TxBuilderContext, K: Ord + Clone
     }
 }
 
-impl<'a, D, Cs: CoinSelectionAlgorithm<K>, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, Cs, CreateTx, K> {
+impl<'a, D, K, Cs: CoinSelectionAlgorithm> TxBuilder<'a, D, K, Cs, CreateTx> {
     /// Replace the recipients already added with a new list
     pub fn set_recipients(&mut self, recipients: Vec<(Script, u64)>) -> &mut Self {
         self.params.recipients = recipients;
@@ -651,7 +657,7 @@ impl<'a, D, Cs: CoinSelectionAlgorithm<K>, K: Ord + Clone + core::fmt::Debug> Tx
 }
 
 // methods supported only by bump_fee
-impl<'a, D, K: Ord + Clone + core::fmt::Debug> TxBuilder<'a, D, DefaultCoinSelectionAlgorithm, BumpFee, K> {
+impl<'a, D, K> TxBuilder<'a, D, K, DefaultCoinSelectionAlgorithm, BumpFee> {
     /// Explicitly tells the wallet that it is allowed to reduce the amount of the output matching this
     /// `script_pubkey` in order to bump the transaction fee. Without specifying this the wallet
     /// will attempt to find a change output to shrink instead.
@@ -769,13 +775,14 @@ impl Default for ChangeSpendPolicy {
     }
 }
 
-
 impl ChangeSpendPolicy {
-    pub(crate) fn is_satisfied_by(&self, utxo: &LocalUtxo<KeychainKind>) -> bool {
+    pub(crate) fn is_satisfied_by(&self, utxo: &LocalUtxo) -> bool {
         match self {
             ChangeSpendPolicy::ChangeAllowed => true,
-            ChangeSpendPolicy::OnlyChange => utxo.keychain == KeychainKind::Internal,
-            ChangeSpendPolicy::ChangeForbidden => utxo.keychain == KeychainKind::External,
+            // TODO: Figure out how to pass keychain into this
+            // ChangeSpendPolicy::OnlyChange => utxo.keychain == KeychainKind::Internal,
+            // ChangeSpendPolicy::ChangeForbidden => utxo.keychain == KeychainKind::External,
+            _ => false,
         }
     }
 }
@@ -873,7 +880,7 @@ mod test {
         assert_eq!(tx.output[2].script_pubkey, From::from(vec![0xAA, 0xEE]));
     }
 
-    fn get_test_utxos() -> Vec<LocalUtxo<KeychainKind>> {
+    fn get_test_utxos() -> Vec<LocalUtxo> {
         use bitcoin::hashes::Hash;
 
         vec![
@@ -883,7 +890,6 @@ mod test {
                     vout: 0,
                 },
                 txout: Default::default(),
-                keychain: KeychainKind::External,
                 is_spent: false,
                 confirmation_time: ConfirmationTime::Unconfirmed,
                 derivation_index: 0,
@@ -894,7 +900,6 @@ mod test {
                     vout: 1,
                 },
                 txout: Default::default(),
-                keychain: KeychainKind::Internal,
                 is_spent: false,
                 confirmation_time: ConfirmationTime::Confirmed {
                     height: 32,
@@ -925,7 +930,7 @@ mod test {
             .collect::<Vec<_>>();
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].keychain, KeychainKind::External);
+        //assert_eq!(filtered[0].keychain, KeychainKind::External);
     }
 
     #[test]
@@ -937,7 +942,7 @@ mod test {
             .collect::<Vec<_>>();
 
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].keychain, KeychainKind::Internal);
+        //assert_eq!(filtered[0].keychain, KeychainKind::Internal);
     }
 
     #[test]
