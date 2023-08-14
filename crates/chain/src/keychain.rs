@@ -11,7 +11,7 @@
 //! [`SpkTxOutIndex`]: crate::SpkTxOutIndex
 
 use crate::{
-    collections::BTreeMap, indexed_tx_graph::IndexedAdditions, local_chain, tx_graph::TxGraph,
+    collections::BTreeMap, indexed_tx_graph::IndexedAdditions, local_chain,
     Anchor, Append,
 };
 
@@ -79,37 +79,6 @@ impl<K> Default for DerivationAdditions<K> {
 impl<K> AsRef<BTreeMap<K, u32>> for DerivationAdditions<K> {
     fn as_ref(&self) -> &BTreeMap<K, u32> {
         &self.0
-    }
-}
-
-/// A structure to update [`KeychainTxOutIndex`], [`TxGraph`] and [`LocalChain`] atomically.
-///
-/// [`LocalChain`]: local_chain::LocalChain
-#[derive(Debug, Clone)]
-pub struct LocalUpdate<K, A> {
-    /// Contains the last active derivation indices per keychain (`K`), which is used to update the
-    /// [`KeychainTxOutIndex`].
-    pub last_active_indices: BTreeMap<K, u32>,
-
-    /// Update for the [`TxGraph`].
-    pub graph: TxGraph<A>,
-
-    /// Update for the [`LocalChain`].
-    ///
-    /// [`LocalChain`]: local_chain::LocalChain
-    pub chain: local_chain::Update,
-}
-
-impl<K, A> LocalUpdate<K, A> {
-    /// Construct a [`LocalUpdate`] with a given [`local_chain::Update`].
-    ///
-    /// [`CheckPoint`]: local_chain::CheckPoint
-    pub fn new(chain_update: local_chain::Update) -> Self {
-        Self {
-            last_active_indices: BTreeMap::new(),
-            graph: TxGraph::default(),
-            chain: chain_update,
-        }
     }
 }
 

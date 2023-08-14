@@ -7,8 +7,7 @@ use std::{io::Write, str::FromStr};
 
 use bdk::{
     bitcoin::{Address, Network},
-    chain::keychain::LocalUpdate,
-    wallet::AddressIndex,
+    wallet::{AddressIndex, LocalUpdate},
     SignOptions, Wallet,
 };
 use bdk_esplora::{esplora_client, EsploraExt};
