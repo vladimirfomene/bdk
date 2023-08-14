@@ -8,7 +8,7 @@ use bdk_chain::{
     bitcoin::{Address, Network, OutPoint, ScriptBuf, Txid},
     indexed_tx_graph::{IndexedAdditions, IndexedTxGraph},
     keychain::LocalChangeSet,
-    local_chain::LocalChain,
+    local_chain::{self, LocalChain},
     Append, ConfirmationHeightAnchor,
 };
 use bdk_electrum::{
@@ -110,7 +110,7 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    let response = match electrum_cmd.clone() {
+    let mut response = match electrum_cmd.clone() {
         ElectrumCommands::Scan {
             stop_gap,
             scan_options,
@@ -269,24 +269,27 @@ fn main() -> anyhow::Result<()> {
         .expect("must get time")
         .as_secs();
 
-    let final_update = response.finalize(&client, Some(now), missing_txids)?;
+    let _ = response.finalize(&client, Some(now), missing_txids)?;
 
     let db_changeset = {
         let mut chain = chain.lock().unwrap();
         let mut graph = graph.lock().unwrap();
 
-        let chain_changeset = chain.apply_update(final_update.chain)?;
+        let chain_changeset = chain.apply_update(local_chain::Update {
+            tip: response.new_tip,
+            introduce_older_blocks: true,
+        })?;
 
         let indexed_additions = {
             let mut additions = IndexedAdditions::<ConfirmationHeightAnchor, _>::default();
             let (_, index_additions) = graph
                 .index
-                .reveal_to_target_multi(&final_update.last_active_indices);
+                .reveal_to_target_multi(&response.keychain_update);
             additions.append(IndexedAdditions {
                 index_additions,
                 ..Default::default()
             });
-            additions.append(graph.apply_update(final_update.graph));
+            additions.append(graph.apply_update(response.graph_update));
             additions
         };
 

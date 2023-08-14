@@ -1,13 +1,12 @@
 use bdk_chain::{
     bitcoin::{OutPoint, ScriptBuf, Transaction, Txid},
-    keychain::LocalUpdate,
     local_chain::{self, CheckPoint},
     tx_graph::{self, TxGraph},
     Anchor, BlockId, ConfirmationHeightAnchor, ConfirmationTimeAnchor,
 };
 use electrum_client::{Client, ElectrumApi, Error, HeaderNotification};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     str::FromStr,
 };
@@ -23,7 +22,7 @@ const ASSUME_FINAL_DEPTH: u32 = 8;
 #[derive(Debug, Clone)]
 pub struct ElectrumUpdate<K, A> {
     /// Map of [`Txid`]s to associated [`Anchor`]s.
-    pub graph_update: HashMap<Txid, BTreeSet<A>>,
+    pub graph_update: TxGraph<A>,
     /// The latest chain tip, as seen by the Electrum server.
     pub new_tip: local_chain::CheckPoint,
     /// Last-used index update for [`KeychainTxOutIndex`](bdk_chain::keychain::KeychainTxOutIndex).
@@ -34,7 +33,7 @@ impl<K, A: Anchor> ElectrumUpdate<K, A> {
     fn new(new_tip: local_chain::CheckPoint) -> Self {
         Self {
             new_tip,
-            graph_update: HashMap::new(),
+            graph_update: TxGraph::default(),
             keychain_update: BTreeMap::new(),
         }
     }
@@ -42,9 +41,11 @@ impl<K, A: Anchor> ElectrumUpdate<K, A> {
     /// Determine the full transactions that are missing from `graph`.
     ///
     /// Refer to [`ElectrumUpdate`].
-    pub fn missing_full_txs<A2>(&self, graph: &TxGraph<A2>) -> Vec<Txid> {
+    pub fn missing_full_txs<A2: Anchor>(&self, graph: &TxGraph<A2>) -> Vec<Txid> {
         self.graph_update
-            .keys()
+            .all_anchors()
+            .iter()
+            .map(|(_, txid)| txid)
             .filter(move |&&txid| graph.as_ref().get_tx(txid).is_none())
             .cloned()
             .collect()
@@ -54,29 +55,19 @@ impl<K, A: Anchor> ElectrumUpdate<K, A> {
     ///
     /// Refer to [`ElectrumUpdate`].
     pub fn finalize(
-        self,
+        &mut self,
         client: &Client,
         seen_at: Option<u64>,
         missing: Vec<Txid>,
-    ) -> Result<LocalUpdate<K, A>, Error> {
+    ) -> Result<(), Error> {
         let new_txs = client.batch_transaction_get(&missing)?;
-        let mut graph_update = TxGraph::<A>::new(new_txs);
-        for (txid, anchors) in self.graph_update {
+        for tx in new_txs {
             if let Some(seen_at) = seen_at {
-                let _ = graph_update.insert_seen_at(txid, seen_at);
+                let _ = self.graph_update.insert_seen_at(tx.txid(), seen_at);
             }
-            for anchor in anchors {
-                let _ = graph_update.insert_anchor(txid, anchor);
-            }
+            let _ = self.graph_update.insert_tx(tx);
         }
-        Ok(LocalUpdate {
-            last_active_indices: self.keychain_update,
-            graph: graph_update,
-            chain: local_chain::Update {
-                tip: self.new_tip,
-                introduce_older_blocks: true,
-            },
-        })
+        Ok(())
     }
 }
 
@@ -88,17 +79,16 @@ impl<K> ElectrumUpdate<K, ConfirmationHeightAnchor> {
     /// Electrum's API intends that we use the merkle proof API, we should change `bdk_electrum` to
     /// use it.
     pub fn finalize_as_confirmation_time(
-        self,
+        mut self,
         client: &Client,
         seen_at: Option<u64>,
         missing: Vec<Txid>,
-    ) -> Result<LocalUpdate<K, ConfirmationTimeAnchor>, Error> {
-        let update = self.finalize(client, seen_at, missing)?;
+    ) -> Result<ElectrumUpdate<K, ConfirmationTimeAnchor>, Error> {
+        let _ = self.finalize(client, seen_at, missing)?;
 
         let relevant_heights = {
             let mut visited_heights = HashSet::new();
-            update
-                .graph
+            self.graph_update
                 .all_anchors()
                 .iter()
                 .map(|(a, _)| a.confirmation_height_upper_bound())
@@ -118,7 +108,7 @@ impl<K> ElectrumUpdate<K, ConfirmationHeightAnchor> {
             .collect::<HashMap<u32, u64>>();
 
         let graph_additions = {
-            let old_additions = TxGraph::default().determine_additions(&update.graph);
+            let old_additions = TxGraph::default().determine_additions(&self.graph_update);
             tx_graph::Additions {
                 txs: old_additions.txs,
                 txouts: old_additions.txouts,
@@ -139,15 +129,13 @@ impl<K> ElectrumUpdate<K, ConfirmationHeightAnchor> {
                     .collect(),
             }
         };
+        let mut update = TxGraph::default();
+        update.apply_additions(graph_additions);
 
-        Ok(LocalUpdate {
-            last_active_indices: update.last_active_indices,
-            graph: {
-                let mut graph = TxGraph::default();
-                graph.apply_additions(graph_additions);
-                graph
-            },
-            chain: update.chain,
+        Ok(ElectrumUpdate {
+            new_tip: self.new_tip,
+            graph_update: update,
+            keychain_update: self.keychain_update,
         })
     }
 }
@@ -458,9 +446,8 @@ fn populate_with_outpoints<K>(
 
             let anchor = determine_tx_anchor(cps, res.height, res.tx_hash);
 
-            let tx_entry = update.graph_update.entry(res.tx_hash).or_default();
             if let Some(anchor) = anchor {
-                tx_entry.insert(anchor);
+                let _ = update.graph_update.insert_anchor(res.tx_hash, anchor);
             }
         }
     }
@@ -495,9 +482,8 @@ fn populate_with_txids<K>(
             None => continue,
         };
 
-        let tx_entry = update.graph_update.entry(txid).or_default();
         if let Some(anchor) = anchor {
-            tx_entry.insert(anchor);
+            let _ = update.graph_update.insert_anchor(txid, anchor);
         }
     }
     Ok(())
@@ -539,9 +525,8 @@ fn populate_with_spks<K, I: Ord + Clone>(
             }
 
             for tx in spk_history {
-                let tx_entry = update.graph_update.entry(tx.tx_hash).or_default();
                 if let Some(anchor) = determine_tx_anchor(cps, tx.height, tx.tx_hash) {
-                    tx_entry.insert(anchor);
+                    let _ = update.graph_update.insert_anchor(tx.tx_hash, anchor);
                 }
             }
         }
