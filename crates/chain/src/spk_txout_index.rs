@@ -3,7 +3,6 @@ use core::ops::RangeBounds;
 use crate::{
     collections::{hash_map::Entry, BTreeMap, BTreeSet, HashMap},
     indexed_tx_graph::Indexer,
-    ForEachTxOut,
 };
 use bitcoin::{self, OutPoint, Script, ScriptBuf, Transaction, TxOut, Txid};
 
@@ -102,15 +101,15 @@ impl<I: Clone + Ord> SpkTxOutIndex<I> {
     /// See [`ForEachTxout`] for the types that support this.
     ///
     /// [`ForEachTxout`]: crate::ForEachTxOut
-    pub fn scan(&mut self, txouts: &impl ForEachTxOut) -> BTreeSet<I> {
+    pub fn scan(&mut self, tx: &bitcoin::Transaction) -> BTreeSet<I> {
         let mut scanned_indices = BTreeSet::new();
 
-        txouts.for_each_txout(|(op, txout)| {
+        for (i, txout) in tx.output.iter().enumerate() {
+            let op = OutPoint::new(tx.txid(), i as u32);
             if let Some(spk_i) = scan_txout!(self, op, txout) {
                 scanned_indices.insert(spk_i.clone());
             }
-        });
-
+        }
         scanned_indices
     }
 

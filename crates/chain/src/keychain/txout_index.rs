@@ -3,7 +3,7 @@ use crate::{
     indexed_tx_graph::Indexer,
     miniscript::{Descriptor, DescriptorPublicKey},
     spk_iter::BIP32_MAX_INDEX,
-    ForEachTxOut, SpkIterator, SpkTxOutIndex,
+    SpkIterator, SpkTxOutIndex,
 };
 use alloc::vec::Vec;
 use bitcoin::{OutPoint, Script, TxOut};
@@ -126,9 +126,11 @@ impl<K: Clone + Ord + Debug> KeychainTxOutIndex<K> {
     /// See [`ForEachTxout`] for the types that support this.
     ///
     /// [`ForEachTxout`]: crate::ForEachTxOut
-    pub fn scan(&mut self, txouts: &impl ForEachTxOut) -> DerivationAdditions<K> {
+    pub fn scan(&mut self, tx: &bitcoin::Transaction) -> DerivationAdditions<K> {
         let mut additions = DerivationAdditions::<K>::default();
-        txouts.for_each_txout(|(op, txout)| additions.append(self.scan_txout(op, txout)));
+        for (op, txout) in tx.output.iter().enumerate() {
+            additions.append(self.scan_txout(OutPoint::new(tx.txid(), op as u32), txout));
+        }
         additions
     }
 

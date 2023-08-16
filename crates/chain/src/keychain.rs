@@ -11,8 +11,7 @@
 //! [`SpkTxOutIndex`]: crate::SpkTxOutIndex
 
 use crate::{
-    collections::BTreeMap, indexed_tx_graph::IndexedAdditions, local_chain,
-    Anchor, Append,
+    collections::BTreeMap, indexed_tx_graph::IndexedAdditions, local_chain, Anchor, Append,
 };
 
 #[cfg(feature = "miniscript")]
