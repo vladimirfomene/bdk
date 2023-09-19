@@ -21,7 +21,7 @@ use alloc::{
 };
 pub use bdk_chain::keychain::Balance;
 use bdk_chain::{
-    indexed_tx_graph,
+    indexed_tx_graph::{self, InsertTxItem},
     keychain::{self, KeychainTxOutIndex},
     local_chain::{self, CannotConnectError, CheckPoint, CheckPointIter, LocalChain},
     tx_graph::{CanonicalTx, TxGraph},
@@ -1976,6 +1976,16 @@ impl<D> Wallet<D> {
     /// Get a reference to the inner [`LocalChain`].
     pub fn local_chain(&self) -> &LocalChain {
         &self.chain
+    }
+
+    /// Set lookahead for all keychains.
+    pub fn set_lookahead_for_all(&mut self, lookahead: u32) {
+        self.indexed_graph.index.set_lookahead_for_all(lookahead);
+    }
+
+    /// TODO
+    pub fn filter_for_relevant_txs<'t>(&'t mut self, txs: impl IntoIterator<Item = InsertTxItem<'t, impl IntoIterator<Item = ConfirmationTimeAnchor>>>) -> impl IntoIterator<Item = InsertTxItem<'t, impl IntoIterator<Item = ConfirmationTimeAnchor>>> {
+        self.indexed_graph.filter_for_relevant_txs(txs)
     }
 }
 

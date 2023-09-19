@@ -156,6 +156,11 @@ where
         changeset
     }
 
+    /// TODO
+    pub fn filter_for_relevant_txs<'t>(&'t mut self, txs: impl IntoIterator<Item = InsertTxItem<'t, impl IntoIterator<Item = A>>>) -> impl IntoIterator<Item = InsertTxItem<'t, impl IntoIterator<Item = A>>> {
+        txs.into_iter().filter(|(tx, _, _)| self.index.is_tx_relevant(tx))
+    }
+
     /// Batch insert transactions.
     ///
     /// All transactions in `txs` will be inserted.
