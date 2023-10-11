@@ -2312,6 +2312,21 @@ impl<D> Wallet<D> {
     pub fn local_chain(&self) -> &LocalChain {
         &self.chain
     }
+
+    /// Set lookahead for all keychains.
+    ///
+    /// Passing a lookahead of 0 will result in an error. This is because if we sync
+    /// the chain with a lookahead of 0, we would not find any update since we don't
+    /// have any scripts stored.
+    pub fn set_lookahead_for_all(&mut self, lookahead: u32) -> Result<(), Error> {
+        if lookahead == 0 {
+            return Err(Error::Generic(
+                "lookahead must be greater than 0".to_string(),
+            ));
+        }
+        self.indexed_graph.index.set_lookahead_for_all(lookahead);
+        Ok(())
+    }
 }
 
 impl<D> AsRef<bdk_chain::tx_graph::TxGraph<ConfirmationTimeHeightAnchor>> for Wallet<D> {
