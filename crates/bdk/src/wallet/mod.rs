@@ -31,8 +31,8 @@ use bdk_chain::{
 use bitcoin::secp256k1::{All, Secp256k1};
 use bitcoin::sighash::{EcdsaSighashType, TapSighashType};
 use bitcoin::{
-    absolute, Address, Network, OutPoint, Script, ScriptBuf, Sequence, Transaction, TxOut, Txid,
-    Weight, Witness,
+    absolute, Address, Block, Network, OutPoint, Script, ScriptBuf, Sequence, Transaction, TxOut,
+    Txid, Weight, Witness,
 };
 use bitcoin::{consensus::encode::serialize, BlockHash};
 use bitcoin::{constants::genesis_block, psbt};
@@ -2326,6 +2326,40 @@ impl<D> Wallet<D> {
         }
         self.indexed_graph.index.set_lookahead_for_all(lookahead);
         Ok(())
+    }
+
+    /// Insert all the block's relevant transactions into the IndexedTxGraph.
+    pub fn apply_block_relevant(
+        &mut self,
+        block: Block,
+        height: u32,
+    ) -> Result<(), CannotConnectError>
+    where
+        D: PersistBackend<ChangeSet>,
+    {
+        let chain_update = CheckPoint::from_header(&block.header, height).into_update(false);
+        let mut changeset = ChangeSet::from(self.chain.apply_update(chain_update)?);
+        changeset.append(ChangeSet::from(
+            self.indexed_graph.apply_block_relevant(block, height),
+        ));
+        self.persist.stage(changeset);
+        Ok(())
+    }
+
+    /// Batch insert unconfirmed transactions into the IndexedTxGraph,
+    /// filtering out those that are not relevant.
+    ///
+    /// Read more here: [`self.indexed_graph.batch_insert_relevant_unconfirmed()`]
+    pub fn batch_insert_relevant_unconfirmed<'t>(
+        &mut self,
+        unconfirmed_txs: impl IntoIterator<Item = (&'t Transaction, u64)>,
+    ) where
+        D: PersistBackend<ChangeSet>,
+    {
+        let indexed_graph_changeset = self
+            .indexed_graph
+            .batch_insert_relevant_unconfirmed(unconfirmed_txs);
+        self.persist.stage(ChangeSet::from(indexed_graph_changeset));
     }
 }
 
