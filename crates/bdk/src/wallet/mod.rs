@@ -2288,7 +2288,7 @@ impl<D> Wallet<D> {
         self.persist.commit().map(|c| c.is_some())
     }
 
-    /// Returns the changes that will be staged with the next call to [`commit`].
+    /// Returns the changes that will be committed with the next call to [`commit`].
     ///
     /// [`commit`]: Self::commit
     pub fn staged(&self) -> &ChangeSet
