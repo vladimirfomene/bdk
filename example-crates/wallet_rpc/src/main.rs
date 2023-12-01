@@ -4,11 +4,16 @@ use bdk::{
     SignOptions,
 };
 use bdk_bitcoind_rpc::{
-    bitcoincore_rpc::{Auth, Client, RpcApi},
+    bitcoincore_rpc::{
+        bitcoincore_rpc_json::{
+            ScanBlocksOptions, ScanBlocksRequest, ScanBlocksRequestDescriptor, ScanBlocksResult,
+        },
+        Auth, Client, RpcApi,
+    },
     Emitter,
 };
 use bdk_file_store::Store;
-use std::str::FromStr;
+use std::{str::FromStr, time::Duration};
 
 const DB_MAGIC: &str = "bdk-rpc-wallet-example";
 const SEND_AMOUNT: u64 = 5000;
@@ -39,12 +44,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let balance = wallet.get_balance();
     println!("Wallet balance before syncing: {} sats", balance.total());
 
-    let rpc_client = Client::new(&args[1], Auth::UserPass(args[2].clone(), args[3].clone()))?;
+    let rpc_client = Client::new_with_timeout(
+        &args[1],
+        Auth::UserPass(args[2].clone(), args[3].clone()),
+        Duration::from_secs(3600),
+    )?;
 
     println!(
         "Connected to Bitcoin Core RPC at {:?}",
         rpc_client.get_blockchain_info().unwrap()
     );
+
+    let external_descriptor = ScanBlocksRequestDescriptor::Extended {
+        desc: external_descriptor.to_string(),
+        range: None,
+    };
+    let internal_descriptor = ScanBlocksRequestDescriptor::Extended {
+        desc: internal_descriptor.to_string(),
+        range: None,
+    };
+    let descriptors = &[external_descriptor, internal_descriptor];
+    let request = ScanBlocksRequest {
+        scanobjects: descriptors,
+        start_height: None,
+        stop_height: None,
+        filtertype: None,
+        options: Some(ScanBlocksOptions {
+            filter_false_positives: Some(true),
+        }),
+    };
+    let res: ScanBlocksResult = rpc_client.scan_blocks_blocking(request)?;
+    println!("scanblocks result: {:?}", res);
 
     wallet.set_lookahead_for_all(args[4].parse::<u32>()?)?;
 
@@ -54,11 +84,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => Emitter::from_height(&rpc_client, args[5].parse::<u32>()?),
     };
 
-    while let Some((height, block)) = emitter.next_block()? {
-        println!("Applying block {} at height {}", block.block_hash(), height);
-        wallet.apply_block_relevant(block, height)?;
+    for bh in res.relevant_blocks {
+        // self.get_relevant_txs(bh, &conn);
+        let block = rpc_client.get_block(&bh)?;
+        let height: u32 = block.bip34_block_height()?.try_into().unwrap();
+        println!("adding block height {} to wallet", height);
+        wallet.apply_block_relevant(block.clone(), height)?;
         wallet.commit()?;
     }
+
+    // while let Some((height, block)) = emitter.next_block()? {
+    //     println!("Applying block {} at height {}", block.block_hash(), height);
+    //     wallet.apply_block_relevant(block, height)?;
+    //     wallet.commit()?;
+    // }
 
     let unconfirmed_txs = emitter.mempool()?;
     println!("Applying unconfirmed transactions: ...");
